@@ -11438,38 +11438,62 @@ var SettingTab = class extends import_obsidian.PluginSettingTab {
     text2("\uBB38\uC11C \uC811\uB450\uC5B4", "", "docPrefix");
     containerEl.createEl("h4", { text: "\u2461 \uC2E4\uC2DC\uAC04 \uD611\uC5C5 (relay)" });
     text2("Relay \uC8FC\uC18C", "\uC608: wss://collab.smallws.com", "wsUrl");
-    text2("\uAE30\uAE30 \uC774\uB984", "\uCEE4\uC11C \uAF2C\uB9AC\uD45C (Mac/iPad)", "deviceLabel").addButton((b) => b.setButtonText("\uC911\uBCF5\uD655\uC778").onClick(async () => {
-      set("\uAE30\uAE30 \uC774\uB984 \uD655\uC778 \uC911\u2026");
-      new import_obsidian.Notice("\uAE30\uAE30 \uC774\uB984 \uD655\uC778 \uC911\u2026");
-      try {
-        const r = await this.plugin.checkAndApplyDevice();
-        set(r.msg, r.ok);
-        new import_obsidian.Notice(r.msg);
-      } catch (e) {
-        set("\uC624\uB958: " + (e && e.message), false);
-        new import_obsidian.Notice("\uC911\uBCF5\uD655\uC778 \uC624\uB958: " + (e && e.message));
-      }
-    }));
     new import_obsidian.Setting(containerEl).setName("\uC624\uD504\uB77C\uC778 \uD3B8\uC9D1 \uC7A0\uAE08").setDesc("\uD56D\uC0C1 \uCF1C\uC9D0 \u2014 \uC11C\uBC84 \uC5F0\uACB0\uC774 \uB04A\uAE30\uBA74 \uD3B8\uC9D1\uC774 \uC790\uB3D9\uC73C\uB85C \uC7A0\uAE41\uB2C8\uB2E4(\uBAA8\uBC14\uC77C=\uC77D\uAE30 \uBAA8\uB4DC). \uC5F0\uACB0\uB418\uBA74 \uC790\uB3D9 \uD574\uC81C.");
     containerEl.createEl("h4", { text: "\uACC4\uC815 (\uB458 \uB2E4 \uACF5\uC6A9)" });
-    text2("\uC544\uC774\uB514", "CouchDB \uACC4\uC815 \u2014 \uBC14\uAFBC \uB4A4 \u300C\uB85C\uADF8\uC778\u300D", "username");
-    text2("\uBE44\uBC00\uBC88\uD638", "", "password", true);
-    new import_obsidian.Setting(containerEl).setName("\uB85C\uADF8\uC778").setDesc("\uC544\uC774\uB514\xB7\uBE44\uBC00\uBC88\uD638\uB97C \uB123\uC740 \uB4A4 \uB204\uB974\uC138\uC694.").addButton((b) => b.setButtonText("\uB85C\uADF8\uC778").setCta().onClick(async () => {
-      if (!s.username || !s.password) {
-        new AlertModal(this.app, "\uB85C\uADF8\uC778 \uC815\uBCF4 \uD544\uC694", "\uC544\uC774\uB514\uC640 \uBE44\uBC00\uBC88\uD638\uB97C \uBAA8\uB450 \uC785\uB825\uD55C \uB4A4 \uB85C\uADF8\uC778\uD558\uC138\uC694.").open();
+    const loggedIn = !!(this.plugin.session || this.plugin._token && this.plugin._tokenExp > Date.now());
+    this._cred = { username: s.username || "", password: s.password || "" };
+    new import_obsidian.Setting(containerEl).setName("\uC544\uC774\uB514").setDesc("CouchDB \uACC4\uC815 \u2014 \uC785\uB825 \uD6C4 \uC544\uB798 \u300C\uB85C\uADF8\uC778\u300D\uC744 \uB20C\uB7EC\uC57C \uB85C\uADF8\uC778\uB429\uB2C8\uB2E4").addText((t) => t.setValue(this._cred.username).onChange((v) => {
+      this._cred.username = v.trim();
+    }));
+    new import_obsidian.Setting(containerEl).setName("\uBE44\uBC00\uBC88\uD638").addText((t) => {
+      t.inputEl.type = "password";
+      t.setValue(this._cred.password).onChange((v) => {
+        this._cred.password = v.trim();
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("\uB85C\uADF8\uC778").setDesc("\uC544\uC774\uB514\xB7\uBE44\uBC00\uBC88\uD638\uB97C \uB123\uC740 \uB4A4 \uC774 \uBC84\uD2BC\uC744 \uB20C\uB7EC\uC57C \uB85C\uADF8\uC778\uB429\uB2C8\uB2E4.").addButton((b) => b.setButtonText("\uB85C\uADF8\uC778").setCta().onClick(async () => {
+      if (!this._cred.username || !this._cred.password) {
+        new AlertModal(this.app, "\uB85C\uADF8\uC778 \uC815\uBCF4 \uD544\uC694", "\uC544\uC774\uB514\uC640 \uBE44\uBC00\uBC88\uD638\uB97C \uBAA8\uB450 \uC785\uB825\uD55C \uB4A4 \u300C\uB85C\uADF8\uC778\u300D\uC744 \uB204\uB974\uC138\uC694.").open();
         return;
       }
+      s.username = this._cred.username;
+      s.password = this._cred.password;
+      await this.plugin.saveSettings();
       set("\uB85C\uADF8\uC778 \uC911\u2026");
       new import_obsidian.Notice("\uB85C\uADF8\uC778 \uC911\u2026");
       try {
         const r = await this.plugin.relogin();
         set(r.msg, r.ok);
         new import_obsidian.Notice(r.msg);
+        if (r.ok) this.display();
       } catch (e) {
         set("\uC624\uB958: " + (e && e.message), false);
         new import_obsidian.Notice("\uB85C\uADF8\uC778 \uC624\uB958: " + (e && e.message));
       }
     }));
+    const devSet = new import_obsidian.Setting(containerEl).setName("\uAE30\uAE30 \uC774\uB984").setDesc(loggedIn ? "\uCEE4\uC11C \uAF2C\uB9AC\uD45C (Mac/iPad) \u2014 \uBC14\uAFBC \uB4A4 \u300C\uC911\uBCF5\uD655\uC778\u300D" : "\u{1F512} \uB85C\uADF8\uC778 \uD6C4 \uBCC0\uACBD\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4");
+    devSet.addText((t) => {
+      t.setValue(s.deviceLabel || "");
+      t.setDisabled(!loggedIn);
+      if (loggedIn) t.onChange(async (v) => {
+        s.deviceLabel = v.trim();
+        await this.plugin.saveSettings();
+      });
+    });
+    devSet.addButton((b) => {
+      b.setButtonText("\uC911\uBCF5\uD655\uC778").setDisabled(!loggedIn).onClick(async () => {
+        set("\uAE30\uAE30 \uC774\uB984 \uD655\uC778 \uC911\u2026");
+        new import_obsidian.Notice("\uAE30\uAE30 \uC774\uB984 \uD655\uC778 \uC911\u2026");
+        try {
+          const r = await this.plugin.checkAndApplyDevice();
+          set(r.msg, r.ok);
+          new import_obsidian.Notice(r.msg);
+        } catch (e) {
+          set("\uC624\uB958: " + (e && e.message), false);
+          new import_obsidian.Notice("\uC911\uBCF5\uD655\uC778 \uC624\uB958: " + (e && e.message));
+        }
+      });
+    });
     containerEl.createEl("h4", { text: "\uC790\uB3D9 \uC5C5\uB370\uC774\uD2B8" });
     new import_obsidian.Setting(containerEl).setName("\uD50C\uB7EC\uADF8\uC778 \uC790\uB3D9 \uC5C5\uB370\uC774\uD2B8").setDesc("\uC2DC\uC791 \uC2DC\xB7\uC778\uD130\uB137 \uC7AC\uC5F0\uACB0 \uC2DC \uCD5C\uC2E0 \uBC84\uC804\uC73C\uB85C \uC790\uB3D9 \uBC18\uC601(\uACF5\uAC1C repo). \uBCC4\uB3C4 \uC124\uC815 \uBD88\uD544\uC694.").addToggle((t) => t.setValue(!!s.autoUpdate).onChange(async (v) => {
       s.autoUpdate = v;
