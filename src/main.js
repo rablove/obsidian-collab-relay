@@ -24,11 +24,8 @@ const DEFAULTS = {
   enabled: true,
   lastSeq: '0',
   deviceId: '',
-  autoUpdate: true,   // 시작·재연결 시 GitHub 최신 릴리스로 자동 업데이트
-  ghToken: '',        // (레거시) 예전 비공개 repo 자동업뎃용 — 공개 전환 후 불필요
-  installedVersion: '',   // 방금 적용한 버전 — 리로드 후 manifest 캐시가 옛 버전이어도 재적용 루프 방지
 };
-const UPDATE_REPO = 'rablove/obsidian-collab-relay';   // 자체 업데이트 대상(공개 repo → 토큰 불필요)
+// 업데이트는 BRAT 으로만 (자체 자동업데이트 제거 — 리로드 루프 방지)
 const nfc = (s) => s.normalize('NFC');
 const b64 = (s) => btoa(unescape(encodeURIComponent(s)));
 const b64url = (s) => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -100,8 +97,6 @@ export default class VaultSyncCollab extends Plugin {
       // 모바일(navigator.onLine 안 믿김) 대비: 잠금 켜져 있으면 서버 핑으로 오프라인 감지
       this.registerInterval(window.setInterval(() => this.lockWatch(), 5000));
       this.onActiveChange(); this.ensurePresence();
-      setTimeout(() => this.checkSelfUpdate(), 4000);   // 시작 시 자동 업데이트 확인(온라인이면)
-      this.registerInterval(window.setInterval(() => this.checkSelfUpdate(), 60 * 60 * 1000));   // 켜둔 채로도 1시간마다
     });
   }
   onunload() { this._rtRunning = false; try { this.applyViewLock(false); } catch (e) {} try { if (this._collabStyle) this._collabStyle.remove(); } catch (e) {} this.endSession(); this.stopPresence(); }
@@ -434,48 +429,7 @@ export default class VaultSyncCollab extends Plugin {
       new Notice(ok ? '🌐 온라인 — 편집 가능' : '🔒 오프라인 — 편집이 잠겼습니다', 4000);
     }
     this.refreshLock();
-    if (changed && ok) { this.gatedSync(); this.checkSelfUpdate(); }   // 재접속 시 전체 catch-up 동안 편집 잠금 + 자동 업데이트
-  }
-  // ── 자체 자동 업데이트 (BRAT 설정 불필요) ──
-  _isNewer(a, b) {   // a > b ?
-    const pa = String(a).replace(/^v/, '').split('.').map(n => parseInt(n) || 0);
-    const pb = String(b).replace(/^v/, '').split('.').map(n => parseInt(n) || 0);
-    for (let i = 0; i < Math.max(pa.length, pb.length); i++) { const x = pa[i] || 0, y = pb[i] || 0; if (x !== y) return x > y; }
-    return false;
-  }
-  async checkSelfUpdate() {
-    try {
-      if (!this.settings.autoUpdate || this._updating) return;
-      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-      const now = Date.now();
-      if (this._lastUpd && now - this._lastUpd < 15 * 60 * 1000) return;   // 15분 쿨다운
-      this._lastUpd = now;
-      const hdr = { 'Accept': 'application/vnd.github+json' };
-      if (this.settings.ghToken) hdr['Authorization'] = 'token ' + this.settings.ghToken;
-      const rel = await requestUrl({ url: `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, headers: hdr, throw: false });
-      if (rel.status !== 200 || !rel.json) return;
-      const latest = String(rel.json.tag_name || '').replace(/^v/, '');
-      const applied = (this.settings.installedVersion && this._isNewer(this.settings.installedVersion, this.manifest.version)) ? this.settings.installedVersion : this.manifest.version;
-      if (!latest || !this._isNewer(latest, applied)) return;
-      this._updating = true;
-      const assets = rel.json.assets || [];
-      const grab = async (name) => {
-        const a = assets.find((x) => x.name === name); if (!a) return null;
-        const priv = !!this.settings.ghToken;
-        const h = priv ? { 'Authorization': 'token ' + this.settings.ghToken, 'Accept': 'application/octet-stream' } : {};
-        const r = await requestUrl({ url: priv ? a.url : a.browser_download_url, headers: h, throw: false });
-        return r.status === 200 ? r.text : null;
-      };
-      const mainJs = await grab('main.js'); const manJson = await grab('manifest.json');
-      if (!mainJs || !manJson) { this._updating = false; return; }
-      const dir = `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
-      await this.app.vault.adapter.write(`${dir}/manifest.json`, manJson);
-      await this.app.vault.adapter.write(`${dir}/main.js`, mainJs);
-      this.settings.installedVersion = latest; await this.saveSettings();   // 재적용 루프 방지
-      try { this.manifest.version = latest; const m = this.app.plugins.manifests && this.app.plugins.manifests[this.manifest.id]; if (m) m.version = latest; } catch (e) {}   // 캐시된 버전도 갱신
-      new Notice(`🔄 플러그인 업데이트 → ${latest} · 적용 중…`, 6000);
-      setTimeout(async () => { try { await this.app.plugins.disablePlugin(this.manifest.id); await this.app.plugins.enablePlugin(this.manifest.id); } catch (e) { this._updating = false; } }, 900);
-    } catch (e) { this._updating = false; }
+    if (changed && ok) { this.gatedSync(); }   // 재접속 시 전체 catch-up 동안 편집 잠금
   }
   refreshLock() {
     const lock = this.settings.enabled && (this.isOffline() || this._gating || this._collabConnecting);   // 오프라인·초기동기화(게이트)·노트 협업 붙는 중이면 편집 잠금
@@ -691,10 +645,7 @@ class SettingTab extends PluginSettingTab {
     devSet.addText(t => { t.setValue(s.deviceLabel || ''); t.setDisabled(!loggedIn); if (loggedIn) t.onChange(async v => { s.deviceLabel = v.trim(); await this.plugin.saveSettings(); }); });
     devSet.addButton(b => { b.setButtonText('중복확인').setDisabled(!loggedIn).onClick(async () => { set('기기 이름 확인 중…'); new Notice('기기 이름 확인 중…'); try { const r = await this.plugin.checkAndApplyDevice(); set(r.msg, r.ok); new Notice(r.msg); } catch (e) { set('오류: ' + (e && e.message), false); new Notice('중복확인 오류: ' + (e && e.message)); } }); });
 
-    containerEl.createEl('h4', { text: '자동 업데이트' });
-    new Setting(containerEl).setName('플러그인 자동 업데이트').setDesc('시작 시·인터넷 재연결 시 최신 버전으로 자동 반영(공개 repo). 별도 설정 불필요.')
-      .addToggle(t => t.setValue(!!s.autoUpdate).onChange(async v => { s.autoUpdate = v; await this.plugin.saveSettings(); if (v) this.plugin.checkSelfUpdate(); }));
-    new Setting(containerEl).setName('지금 업데이트 확인').addButton(b => b.setButtonText('확인').onClick(async () => { set('업데이트 확인 중…'); this.plugin._lastUpd = 0; await this.plugin.checkSelfUpdate(); set('업데이트 확인 완료(최신이면 변화 없음)'); }));
+    new Setting(containerEl).setName('업데이트').setDesc('업데이트는 BRAT 으로 합니다 — BRAT → «Check for updates to all beta plugins».');
 
     const line = containerEl.createEl('div', { text: '상태: 미확인' }); line.style.margin = '8px 2px 12px'; line.style.fontWeight = '600'; line.style.color = 'var(--text-muted)';
     const set = (m, ok) => { line.setText(m); line.style.color = ok === true ? 'var(--text-success)' : ok === false ? 'var(--text-error)' : 'var(--text-muted)'; };

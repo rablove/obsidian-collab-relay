@@ -283,7 +283,7 @@ var MIN_SAFE_INTEGER = Number.MIN_SAFE_INTEGER;
 var LOWEST_INT32 = 1 << 31;
 var isInteger = Number.isInteger || ((num) => typeof num === "number" && isFinite(num) && floor(num) === num);
 var isNaN2 = Number.isNaN;
-var parseInt2 = Number.parseInt;
+var parseInt = Number.parseInt;
 
 // node_modules/lib0/string.js
 var fromCharCode = String.fromCharCode;
@@ -10370,15 +10370,8 @@ var DEFAULTS = {
   // 기본 ON — 오프라인이면 편집 잠금(모바일=읽기모드 강제)
   enabled: true,
   lastSeq: "0",
-  deviceId: "",
-  autoUpdate: true,
-  // 시작·재연결 시 GitHub 최신 릴리스로 자동 업데이트
-  ghToken: "",
-  // (레거시) 예전 비공개 repo 자동업뎃용 — 공개 전환 후 불필요
-  installedVersion: ""
-  // 방금 적용한 버전 — 리로드 후 manifest 캐시가 옛 버전이어도 재적용 루프 방지
+  deviceId: ""
 };
-var UPDATE_REPO = "rablove/obsidian-collab-relay";
 var nfc = (s) => s.normalize("NFC");
 var b64 = (s) => btoa(unescape(encodeURIComponent(s)));
 var b64url = (s) => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -10464,8 +10457,6 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       this.registerInterval(window.setInterval(() => this.lockWatch(), 5e3));
       this.onActiveChange();
       this.ensurePresence();
-      setTimeout(() => this.checkSelfUpdate(), 4e3);
-      this.registerInterval(window.setInterval(() => this.checkSelfUpdate(), 60 * 60 * 1e3));
     });
   }
   onunload() {
@@ -11095,71 +11086,6 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     this.refreshLock();
     if (changed && ok) {
       this.gatedSync();
-      this.checkSelfUpdate();
-    }
-  }
-  // ── 자체 자동 업데이트 (BRAT 설정 불필요) ──
-  _isNewer(a, b) {
-    const pa = String(a).replace(/^v/, "").split(".").map((n) => parseInt(n) || 0);
-    const pb = String(b).replace(/^v/, "").split(".").map((n) => parseInt(n) || 0);
-    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-      const x = pa[i] || 0, y = pb[i] || 0;
-      if (x !== y) return x > y;
-    }
-    return false;
-  }
-  async checkSelfUpdate() {
-    try {
-      if (!this.settings.autoUpdate || this._updating) return;
-      if (typeof navigator !== "undefined" && navigator.onLine === false) return;
-      const now = Date.now();
-      if (this._lastUpd && now - this._lastUpd < 15 * 60 * 1e3) return;
-      this._lastUpd = now;
-      const hdr = { "Accept": "application/vnd.github+json" };
-      if (this.settings.ghToken) hdr["Authorization"] = "token " + this.settings.ghToken;
-      const rel = await (0, import_obsidian.requestUrl)({ url: `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, headers: hdr, throw: false });
-      if (rel.status !== 200 || !rel.json) return;
-      const latest = String(rel.json.tag_name || "").replace(/^v/, "");
-      const applied = this.settings.installedVersion && this._isNewer(this.settings.installedVersion, this.manifest.version) ? this.settings.installedVersion : this.manifest.version;
-      if (!latest || !this._isNewer(latest, applied)) return;
-      this._updating = true;
-      const assets = rel.json.assets || [];
-      const grab = async (name) => {
-        const a = assets.find((x) => x.name === name);
-        if (!a) return null;
-        const priv = !!this.settings.ghToken;
-        const h = priv ? { "Authorization": "token " + this.settings.ghToken, "Accept": "application/octet-stream" } : {};
-        const r = await (0, import_obsidian.requestUrl)({ url: priv ? a.url : a.browser_download_url, headers: h, throw: false });
-        return r.status === 200 ? r.text : null;
-      };
-      const mainJs = await grab("main.js");
-      const manJson = await grab("manifest.json");
-      if (!mainJs || !manJson) {
-        this._updating = false;
-        return;
-      }
-      const dir = `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
-      await this.app.vault.adapter.write(`${dir}/manifest.json`, manJson);
-      await this.app.vault.adapter.write(`${dir}/main.js`, mainJs);
-      this.settings.installedVersion = latest;
-      await this.saveSettings();
-      try {
-        this.manifest.version = latest;
-        const m = this.app.plugins.manifests && this.app.plugins.manifests[this.manifest.id];
-        if (m) m.version = latest;
-      } catch (e) {
-      }
-      new import_obsidian.Notice(`\u{1F504} \uD50C\uB7EC\uADF8\uC778 \uC5C5\uB370\uC774\uD2B8 \u2192 ${latest} \xB7 \uC801\uC6A9 \uC911\u2026`, 6e3);
-      setTimeout(async () => {
-        try {
-          await this.app.plugins.disablePlugin(this.manifest.id);
-          await this.app.plugins.enablePlugin(this.manifest.id);
-        } catch (e) {
-          this._updating = false;
-        }
-      }, 900);
-    } catch (e) {
-      this._updating = false;
     }
   }
   refreshLock() {
@@ -11589,18 +11515,7 @@ var SettingTab = class extends import_obsidian.PluginSettingTab {
         }
       });
     });
-    containerEl.createEl("h4", { text: "\uC790\uB3D9 \uC5C5\uB370\uC774\uD2B8" });
-    new import_obsidian.Setting(containerEl).setName("\uD50C\uB7EC\uADF8\uC778 \uC790\uB3D9 \uC5C5\uB370\uC774\uD2B8").setDesc("\uC2DC\uC791 \uC2DC\xB7\uC778\uD130\uB137 \uC7AC\uC5F0\uACB0 \uC2DC \uCD5C\uC2E0 \uBC84\uC804\uC73C\uB85C \uC790\uB3D9 \uBC18\uC601(\uACF5\uAC1C repo). \uBCC4\uB3C4 \uC124\uC815 \uBD88\uD544\uC694.").addToggle((t) => t.setValue(!!s.autoUpdate).onChange(async (v) => {
-      s.autoUpdate = v;
-      await this.plugin.saveSettings();
-      if (v) this.plugin.checkSelfUpdate();
-    }));
-    new import_obsidian.Setting(containerEl).setName("\uC9C0\uAE08 \uC5C5\uB370\uC774\uD2B8 \uD655\uC778").addButton((b) => b.setButtonText("\uD655\uC778").onClick(async () => {
-      set("\uC5C5\uB370\uC774\uD2B8 \uD655\uC778 \uC911\u2026");
-      this.plugin._lastUpd = 0;
-      await this.plugin.checkSelfUpdate();
-      set("\uC5C5\uB370\uC774\uD2B8 \uD655\uC778 \uC644\uB8CC(\uCD5C\uC2E0\uC774\uBA74 \uBCC0\uD654 \uC5C6\uC74C)");
-    }));
+    new import_obsidian.Setting(containerEl).setName("\uC5C5\uB370\uC774\uD2B8").setDesc("\uC5C5\uB370\uC774\uD2B8\uB294 BRAT \uC73C\uB85C \uD569\uB2C8\uB2E4 \u2014 BRAT \u2192 \xABCheck for updates to all beta plugins\xBB.");
     const line = containerEl.createEl("div", { text: "\uC0C1\uD0DC: \uBBF8\uD655\uC778" });
     line.style.margin = "8px 2px 12px";
     line.style.fontWeight = "600";
