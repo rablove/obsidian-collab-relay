@@ -10382,6 +10382,19 @@ var b64 = (s) => btoa(unescape(encodeURIComponent(s)));
 var b64url = (s) => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 var COLORS = ["#e11d48", "#f59e0b", "#10b981", "#3b82f6", "#8b5cf6", "#ec4899", "#0891b2", "#65a30d"];
+var COLLAB_CSS = `
+.cm-ySelectionCaret { border-left-width: 2px !important; border-right-width: 0 !important; margin-right: 0 !important; }
+.cm-ySelectionCaretDot { width: .5em !important; height: .5em !important; top: -.28em !important; left: -.25em !important; box-shadow: 0 0 0 1.5px var(--background-primary) !important; }
+.cm-ySelectionInfo {
+  opacity: 1 !important; top: -1.5em !important; left: -2px !important;
+  padding: 1px 6px !important; border-radius: 5px 5px 5px 1px !important;
+  font-family: var(--font-interface, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif) !important;
+  font-size: 11px !important; font-style: normal !important; font-weight: 600 !important; line-height: 1.5 !important;
+  letter-spacing: .2px !important; color: #fff !important; white-space: nowrap !important;
+  box-shadow: 0 1px 4px rgba(0,0,0,.28) !important; transition: opacity .15s ease !important; pointer-events: none !important;
+}
+.cm-ySelection { border-radius: 2px; }
+`;
 var VaultSyncCollab = class extends import_obsidian.Plugin {
   async onload() {
     await this.loadSettings();
@@ -10394,6 +10407,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       await this.saveSettings();
     }
     this.userColor = COLORS[Math.floor(Math.random() * COLORS.length)];
+    this._collabStyle = document.head.createEl("style", { text: COLLAB_CSS });
     this.shadow = /* @__PURE__ */ new Map();
     this.applying = false;
     this.syncing = false;
@@ -10454,6 +10468,10 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     this._rtRunning = false;
     try {
       this.applyViewLock(false);
+    } catch (e) {
+    }
+    try {
+      if (this._collabStyle) this._collabStyle.remove();
     } catch (e) {
     }
     this.endSession();
@@ -11290,7 +11308,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     const provider = new WebsocketProvider(this.settings.wsUrl, room, ydoc, { params: { token } });
     const ytext = ydoc.getText("content");
     const label = `${this.settings.username}\xB7${this.settings.deviceLabel}`;
-    provider.awareness.setLocalStateField("user", { name: label, color: this.userColor, colorLight: this.userColor + "33", login: this.settings.username });
+    provider.awareness.setLocalStateField("user", { name: label, color: this.userColor, colorLight: this.userColor + "40", login: this.settings.username });
     const session = { path, ydoc, provider, ytext, cm, attached: false, saveTimer: null, onSync: null, persist: null };
     this.session = session;
     this.collabPath = nfc(path);
