@@ -622,7 +622,7 @@ class SettingTab extends PluginSettingTab {
     text('비밀번호', '', 'password', true);
     text('Vault 키', '서버 접속 열쇠 — 최초 1회만 입력', 'vaultClientKey', true);
     new Setting(containerEl).setName('로그인').setDesc('아이디·비밀번호·Vault 키를 넣은 뒤 누르세요.')
-      .addButton(b => b.setButtonText('로그인').setCta().onClick(async () => { set('로그인 중…'); new Notice('로그인 중…'); try { const r = await this.plugin.relogin(); set(r.msg, r.ok); new Notice(r.msg); } catch (e) { set('오류: ' + (e && e.message), false); new Notice('로그인 오류: ' + (e && e.message)); } }));
+      .addButton(b => b.setButtonText('로그인').setCta().onClick(async () => { if (!s.username || !s.password) { new AlertModal(this.app, '로그인 정보 필요', '아이디와 비밀번호를 모두 입력한 뒤 로그인하세요.').open(); return; } set('로그인 중…'); new Notice('로그인 중…'); try { const r = await this.plugin.relogin(); set(r.msg, r.ok); new Notice(r.msg); } catch (e) { set('오류: ' + (e && e.message), false); new Notice('로그인 오류: ' + (e && e.message)); } }));
 
     containerEl.createEl('h4', { text: '자동 업데이트' });
     new Setting(containerEl).setName('플러그인 자동 업데이트').setDesc('시작 시·인터넷 재연결 시 최신 버전으로 자동 반영(공개 repo). 별도 설정 불필요.')
@@ -660,6 +660,19 @@ class SyncGateModal extends Modal {
     contentEl.createEl('p', { text: '다른 기기의 변경사항을 받아오는 중입니다. 완료되면 편집할 수 있습니다.' });
     const s = contentEl.createEl('p', { text: '잠시만 기다려주세요…' });
     s.style.color = 'var(--text-muted)';
+  }
+  onClose() { this.contentEl.empty(); }
+}
+class AlertModal extends Modal {
+  constructor(app, title, body) { super(app); this.t = title; this.b = body; }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl('h3', { text: this.t });
+    contentEl.createEl('p', { text: this.b });
+    const row = contentEl.createDiv({ cls: 'modal-button-container' });
+    row.style.display = 'flex'; row.style.justifyContent = 'flex-end';
+    const ok = row.createEl('button', { text: '확인' }); ok.classList.add('mod-cta');
+    ok.onclick = () => this.close();
   }
   onClose() { this.contentEl.empty(); }
 }

@@ -11421,6 +11421,10 @@ var SettingTab = class extends import_obsidian.PluginSettingTab {
     text2("\uBE44\uBC00\uBC88\uD638", "", "password", true);
     text2("Vault \uD0A4", "\uC11C\uBC84 \uC811\uC18D \uC5F4\uC1E0 \u2014 \uCD5C\uCD08 1\uD68C\uB9CC \uC785\uB825", "vaultClientKey", true);
     new import_obsidian.Setting(containerEl).setName("\uB85C\uADF8\uC778").setDesc("\uC544\uC774\uB514\xB7\uBE44\uBC00\uBC88\uD638\xB7Vault \uD0A4\uB97C \uB123\uC740 \uB4A4 \uB204\uB974\uC138\uC694.").addButton((b) => b.setButtonText("\uB85C\uADF8\uC778").setCta().onClick(async () => {
+      if (!s.username || !s.password) {
+        new AlertModal(this.app, "\uB85C\uADF8\uC778 \uC815\uBCF4 \uD544\uC694", "\uC544\uC774\uB514\uC640 \uBE44\uBC00\uBC88\uD638\uB97C \uBAA8\uB450 \uC785\uB825\uD55C \uB4A4 \uB85C\uADF8\uC778\uD558\uC138\uC694.").open();
+        return;
+      }
       set("\uB85C\uADF8\uC778 \uC911\u2026");
       new import_obsidian.Notice("\uB85C\uADF8\uC778 \uC911\u2026");
       try {
@@ -11480,6 +11484,27 @@ var SyncGateModal = class extends import_obsidian.Modal {
     contentEl.createEl("p", { text: "\uB2E4\uB978 \uAE30\uAE30\uC758 \uBCC0\uACBD\uC0AC\uD56D\uC744 \uBC1B\uC544\uC624\uB294 \uC911\uC785\uB2C8\uB2E4. \uC644\uB8CC\uB418\uBA74 \uD3B8\uC9D1\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4." });
     const s = contentEl.createEl("p", { text: "\uC7A0\uC2DC\uB9CC \uAE30\uB2E4\uB824\uC8FC\uC138\uC694\u2026" });
     s.style.color = "var(--text-muted)";
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+var AlertModal = class extends import_obsidian.Modal {
+  constructor(app, title, body) {
+    super(app);
+    this.t = title;
+    this.b = body;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl("h3", { text: this.t });
+    contentEl.createEl("p", { text: this.b });
+    const row = contentEl.createDiv({ cls: "modal-button-container" });
+    row.style.display = "flex";
+    row.style.justifyContent = "flex-end";
+    const ok = row.createEl("button", { text: "\uD655\uC778" });
+    ok.classList.add("mod-cta");
+    ok.onclick = () => this.close();
   }
   onClose() {
     this.contentEl.empty();
