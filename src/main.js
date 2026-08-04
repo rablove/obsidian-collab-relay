@@ -197,18 +197,28 @@ export default class VaultSyncCollab extends Plugin {
   }
   // 연결 시 전체 당겨받기: 서버의 모든 cvs: 문서를 받아 로컬에 없거나 다른 것만 기록(비파괴).
   // lastSeq 상태·longpoll 진행 여부와 무관하게 "누르면 파일이 온다"를 보장한다.
-  async pullAllFromServer() {
+  async pullAllFromServer(onProgress) {
     if (!this.configured()) return 0;
     while (this.syncing) await sleep(50);
     this.syncing = true; this.setSync('파일 받는 중…');
     try {
       const prefix = this.settings.docPrefix || '';
       const hi = prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
-      const q = `${this.dbPath('_all_docs')}?include_docs=true&startkey=${encodeURIComponent(JSON.stringify(prefix))}&endkey=${encodeURIComponent(JSON.stringify(hi))}`;
-      const res = await this.req('GET', q);
-      if (res.status !== 200 || !res.json || !Array.isArray(res.json.rows)) { this.setSync('오류 ' + res.status); return 0; }
-      let n = 0;
-      for (const row of res.json.rows) { const d = row.doc; if (d && await this.applyRemote(d)) n++; }
+      // 1) id 목록만 먼저(가벼움) → 총 개수 = 진행률 분모
+      const idsRes = await this.req('GET', `${this.dbPath('_all_docs')}?startkey=${encodeURIComponent(JSON.stringify(prefix))}&endkey=${encodeURIComponent(JSON.stringify(hi))}`);
+      if (idsRes.status !== 200 || !idsRes.json || !Array.isArray(idsRes.json.rows)) { this.setSync('오류 ' + idsRes.status); return 0; }
+      const ids = idsRes.json.rows.map((r) => r.id);
+      const total = ids.length;
+      if (onProgress) onProgress(0, total);
+      // 2) 배치로 본문 받아 적용 — 배치마다 진행률 보고(다운로드+적용 모두 반영)
+      let n = 0, done = 0; const B = 50;
+      for (let i = 0; i < ids.length; i += B) {
+        const batch = ids.slice(i, i + B);
+        const res = await this.req('POST', this.dbPath('_all_docs?include_docs=true'), { keys: batch });
+        if (res.status === 200 && res.json && Array.isArray(res.json.rows)) {
+          for (const row of res.json.rows) { const d = row.doc; if (d && await this.applyRemote(d)) n++; done++; if (onProgress) onProgress(done, total); }
+        } else { done += batch.length; if (onProgress) onProgress(done, total); }
+      }
       try { const info = await this.req('GET', encodeURIComponent(this.settings.dbName)); if (info.status === 200 && info.json && info.json.update_seq !== undefined) { this.settings.lastSeq = info.json.update_seq; await this.saveSettings(); } } catch (e) {}
       this.setSync(n ? `받음 ${n}` : 'ok');
       return n;
@@ -220,10 +230,11 @@ export default class VaultSyncCollab extends Plugin {
   async gatedSync() {
     if (this._gating || !this.configured() || this.isOffline()) return;
     this._gating = true; this.refreshLock();
-    let modal = null;
-    const t = setTimeout(() => { try { modal = new SyncGateModal(this.app); modal.open(); } catch (e) {} }, 600);
-    try { await this.pullAllFromServer(); } catch (e) {}
-    clearTimeout(t); if (modal) { try { modal.close(); } catch (e) {} }
+    let modal = null, last = { done: 0, total: 0 };
+    const t = setTimeout(() => { try { modal = new SyncGateModal(this.app); modal.open(); modal.setProgress(last.done, last.total); } catch (e) {} }, 500);   // 오래 걸릴 때만 모달
+    const onProg = (done, total) => { last = { done, total }; if (modal) modal.setProgress(done, total); };
+    try { await this.pullAllFromServer(onProg); } catch (e) {}
+    clearTimeout(t); if (modal) { modal.allowClose = true; try { modal.close(); } catch (e) {} }   // 완료 시에만 자동 닫힘
     this._gating = false; this.refreshLock();
   }
   async longPollLoop() {
@@ -651,13 +662,28 @@ class SettingTab extends PluginSettingTab {
 }
 
 class SyncGateModal extends Modal {
+  constructor(app) { super(app); this.allowClose = false; this.done = 0; this.total = 0; }
   onOpen() {
-    const { contentEl } = this;
+    const { contentEl, modalEl } = this;
+    const x = modalEl.querySelector('.modal-close-button'); if (x) x.remove();   // X 버튼 제거 → 수동 닫기 불가
     contentEl.createEl('h3', { text: '🔄 동기화 중' });
-    contentEl.createEl('p', { text: '다른 기기의 변경사항을 받아오는 중입니다. 완료되면 편집할 수 있습니다.' });
-    const s = contentEl.createEl('p', { text: '잠시만 기다려주세요…' });
-    s.style.color = 'var(--text-muted)';
+    contentEl.createEl('p', { text: '다른 기기의 변경사항을 받아오는 중입니다. 완료되면 자동으로 닫히고 편집할 수 있습니다.' });
+    const wrap = contentEl.createDiv();
+    wrap.style.cssText = 'height:10px;border-radius:5px;background:var(--background-modifier-border);overflow:hidden;margin:12px 0 6px;';
+    this.bar = wrap.createDiv();
+    this.bar.style.cssText = 'height:100%;width:0%;background:var(--interactive-accent);transition:width .2s ease;';
+    this.pct = contentEl.createEl('p', { text: '준비 중…' });
+    this.pct.style.cssText = 'color:var(--text-muted);text-align:right;margin:0;';
+    this.render();
   }
+  setProgress(done, total) { this.done = done; this.total = total; this.render(); }
+  render() {
+    if (!this.bar) return;
+    const p = this.total > 0 ? Math.round(this.done / this.total * 100) : 0;
+    this.bar.style.width = p + '%';
+    if (this.pct) this.pct.setText(this.total > 0 ? `${p}% (${this.done}/${this.total})` : '준비 중…');
+  }
+  close() { if (this.allowClose) super.close(); }   // 완료 전엔 Esc·배경클릭·X 로 안 닫힘
   onClose() { this.contentEl.empty(); }
 }
 class AlertModal extends Modal {

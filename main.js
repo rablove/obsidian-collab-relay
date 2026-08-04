@@ -10618,7 +10618,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   }
   // 연결 시 전체 당겨받기: 서버의 모든 cvs: 문서를 받아 로컬에 없거나 다른 것만 기록(비파괴).
   // lastSeq 상태·longpoll 진행 여부와 무관하게 "누르면 파일이 온다"를 보장한다.
-  async pullAllFromServer() {
+  async pullAllFromServer(onProgress) {
     if (!this.configured()) return 0;
     while (this.syncing) await sleep(50);
     this.syncing = true;
@@ -10626,16 +10626,30 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     try {
       const prefix = this.settings.docPrefix || "";
       const hi = prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
-      const q = `${this.dbPath("_all_docs")}?include_docs=true&startkey=${encodeURIComponent(JSON.stringify(prefix))}&endkey=${encodeURIComponent(JSON.stringify(hi))}`;
-      const res = await this.req("GET", q);
-      if (res.status !== 200 || !res.json || !Array.isArray(res.json.rows)) {
-        this.setSync("\uC624\uB958 " + res.status);
+      const idsRes = await this.req("GET", `${this.dbPath("_all_docs")}?startkey=${encodeURIComponent(JSON.stringify(prefix))}&endkey=${encodeURIComponent(JSON.stringify(hi))}`);
+      if (idsRes.status !== 200 || !idsRes.json || !Array.isArray(idsRes.json.rows)) {
+        this.setSync("\uC624\uB958 " + idsRes.status);
         return 0;
       }
-      let n = 0;
-      for (const row of res.json.rows) {
-        const d = row.doc;
-        if (d && await this.applyRemote(d)) n++;
+      const ids = idsRes.json.rows.map((r) => r.id);
+      const total = ids.length;
+      if (onProgress) onProgress(0, total);
+      let n = 0, done = 0;
+      const B = 50;
+      for (let i = 0; i < ids.length; i += B) {
+        const batch = ids.slice(i, i + B);
+        const res = await this.req("POST", this.dbPath("_all_docs?include_docs=true"), { keys: batch });
+        if (res.status === 200 && res.json && Array.isArray(res.json.rows)) {
+          for (const row of res.json.rows) {
+            const d = row.doc;
+            if (d && await this.applyRemote(d)) n++;
+            done++;
+            if (onProgress) onProgress(done, total);
+          }
+        } else {
+          done += batch.length;
+          if (onProgress) onProgress(done, total);
+        }
       }
       try {
         const info = await this.req("GET", encodeURIComponent(this.settings.dbName));
@@ -10661,20 +10675,26 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     if (this._gating || !this.configured() || this.isOffline()) return;
     this._gating = true;
     this.refreshLock();
-    let modal = null;
+    let modal = null, last2 = { done: 0, total: 0 };
     const t = setTimeout(() => {
       try {
         modal = new SyncGateModal(this.app);
         modal.open();
+        modal.setProgress(last2.done, last2.total);
       } catch (e) {
       }
-    }, 600);
+    }, 500);
+    const onProg = (done, total) => {
+      last2 = { done, total };
+      if (modal) modal.setProgress(done, total);
+    };
     try {
-      await this.pullAllFromServer();
+      await this.pullAllFromServer(onProg);
     } catch (e) {
     }
     clearTimeout(t);
     if (modal) {
+      modal.allowClose = true;
       try {
         modal.close();
       } catch (e) {
@@ -11474,13 +11494,41 @@ var SettingTab = class extends import_obsidian.PluginSettingTab {
   }
 };
 var SyncGateModal = class extends import_obsidian.Modal {
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.createEl("h3", { text: "\u{1F504} \uB3D9\uAE30\uD654 \uC911" });
-    contentEl.createEl("p", { text: "\uB2E4\uB978 \uAE30\uAE30\uC758 \uBCC0\uACBD\uC0AC\uD56D\uC744 \uBC1B\uC544\uC624\uB294 \uC911\uC785\uB2C8\uB2E4. \uC644\uB8CC\uB418\uBA74 \uD3B8\uC9D1\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4." });
-    const s = contentEl.createEl("p", { text: "\uC7A0\uC2DC\uB9CC \uAE30\uB2E4\uB824\uC8FC\uC138\uC694\u2026" });
-    s.style.color = "var(--text-muted)";
+  constructor(app) {
+    super(app);
+    this.allowClose = false;
+    this.done = 0;
+    this.total = 0;
   }
+  onOpen() {
+    const { contentEl, modalEl } = this;
+    const x = modalEl.querySelector(".modal-close-button");
+    if (x) x.remove();
+    contentEl.createEl("h3", { text: "\u{1F504} \uB3D9\uAE30\uD654 \uC911" });
+    contentEl.createEl("p", { text: "\uB2E4\uB978 \uAE30\uAE30\uC758 \uBCC0\uACBD\uC0AC\uD56D\uC744 \uBC1B\uC544\uC624\uB294 \uC911\uC785\uB2C8\uB2E4. \uC644\uB8CC\uB418\uBA74 \uC790\uB3D9\uC73C\uB85C \uB2EB\uD788\uACE0 \uD3B8\uC9D1\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4." });
+    const wrap = contentEl.createDiv();
+    wrap.style.cssText = "height:10px;border-radius:5px;background:var(--background-modifier-border);overflow:hidden;margin:12px 0 6px;";
+    this.bar = wrap.createDiv();
+    this.bar.style.cssText = "height:100%;width:0%;background:var(--interactive-accent);transition:width .2s ease;";
+    this.pct = contentEl.createEl("p", { text: "\uC900\uBE44 \uC911\u2026" });
+    this.pct.style.cssText = "color:var(--text-muted);text-align:right;margin:0;";
+    this.render();
+  }
+  setProgress(done, total) {
+    this.done = done;
+    this.total = total;
+    this.render();
+  }
+  render() {
+    if (!this.bar) return;
+    const p = this.total > 0 ? Math.round(this.done / this.total * 100) : 0;
+    this.bar.style.width = p + "%";
+    if (this.pct) this.pct.setText(this.total > 0 ? `${p}% (${this.done}/${this.total})` : "\uC900\uBE44 \uC911\u2026");
+  }
+  close() {
+    if (this.allowClose) super.close();
+  }
+  // 완료 전엔 Esc·배경클릭·X 로 안 닫힘
   onClose() {
     this.contentEl.empty();
   }
