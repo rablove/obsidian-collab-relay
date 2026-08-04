@@ -10394,6 +10394,7 @@ var COLLAB_CSS = `
   box-shadow: 0 1px 4px rgba(0,0,0,.28) !important; transition: opacity .15s ease !important; pointer-events: none !important;
 }
 .cm-ySelection { border-radius: 2px; }
+.modal.mod-collab-syncgate .modal-close-button { display: none !important; }
 `;
 var VaultSyncCollab = class extends import_obsidian.Plugin {
   async onload() {
@@ -10443,6 +10444,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       this.setNet(ok);
       new import_obsidian.Notice(ok ? "\u{1F310} \uC11C\uBC84 \uC5F0\uACB0\uB428 (\uC628\uB77C\uC778)" : "\u{1F512} \uC11C\uBC84 \uC5F0\uACB0 \uC548\uB428 (\uC624\uD504\uB77C\uC778 \u2014 \uD3B8\uC9D1\uC7A0\uAE08 \uB300\uC0C1)", 5e3);
     } });
+    this.addCommand({ id: "conflict-log", name: "\uCDA9\uB3CC \uB85C\uADF8 \uBCF4\uAE30", callback: async () => new ConflictLogModal(this.app, await this.readConflictLog()).open() });
     this.app.workspace.onLayoutReady(async () => {
       this.registerEvent(this.app.vault.on("modify", (f) => this.onLocal(f)));
       this.registerEvent(this.app.vault.on("create", (f) => this.onLocal(f)));
@@ -10561,6 +10563,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       const server = cur.status === 200 && cur.json ? cur.json : null;
       const base = this.shadow.get(pNfc);
       if (server && !server.deleted && server.content !== void 0 && server.content !== content && base !== void 0 && server.content !== base) {
+        await this.logConflict(pNfc, "upsert", base, content, server.content, mtime, server.mtime || 0, server.lastEditor);
         if (mtime >= (server.mtime || 0)) {
           await this.saveConflictCopy(pNfc, server.content, server.mtime || Date.now(), "server");
         } else {
@@ -10817,6 +10820,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       }
       const st = await this.app.vault.adapter.stat(p);
       const lm = st ? st.mtime : 0;
+      await this.logConflict(p, "applyRemote", base, local, R, lm, doc2.mtime || 0, doc2.lastEditor);
       if ((doc2.mtime || 0) >= lm) {
         await this.saveConflictCopy(p, local, lm, this.settings.deviceId || "local");
         await this.writeLocal(p, R);
@@ -10877,6 +10881,62 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   tstamp() {
     const d = /* @__PURE__ */ new Date(), z = (n) => String(n).padStart(2, "0");
     return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}${z(d.getMinutes())}`;
+  }
+  _diffAt(a, b) {
+    a = a || "";
+    b = b || "";
+    let i = 0;
+    const m = Math.min(a.length, b.length);
+    while (i < m && a[i] === b[i]) i++;
+    return { i, local: a.slice(Math.max(0, i - 14), i + 14), server: b.slice(Math.max(0, i - 14), i + 14) };
+  }
+  async logConflict(p, where, base, local, server, localMtime, serverMtime, serverLastEditor) {
+    try {
+      const d = this._diffAt(local, server);
+      const rec = {
+        t: (/* @__PURE__ */ new Date()).toISOString(),
+        where,
+        path: p,
+        baseLen: (base || "").length,
+        localLen: (local || "").length,
+        serverLen: (server || "").length,
+        localChanged: (base || "") !== (local || ""),
+        serverChanged: (base || "") !== (server || ""),
+        localMtime,
+        serverMtime,
+        serverLastEditor: serverLastEditor || null,
+        firstDiff: d.i,
+        aroundLocal: d.local,
+        aroundServer: d.server,
+        collabOpen: nfc(p) === this.collabPath,
+        deviceId: this.settings.deviceId,
+        device: this.settings.deviceLabel,
+        user: this.settings.username
+      };
+      console.warn("[collab] \uCDA9\uB3CC \uB85C\uADF8", rec);
+      const f = `${this.app.vault.configDir}/plugins/${this.manifest.id}/conflict-log.jsonl`;
+      const line = JSON.stringify(rec) + "\n";
+      try {
+        await this.app.vault.adapter.append(f, line);
+      } catch (e) {
+        let prev = "";
+        try {
+          if (await this.app.vault.adapter.exists(f)) prev = await this.app.vault.adapter.read(f);
+        } catch (e2) {
+        }
+        await this.app.vault.adapter.write(f, prev + line);
+      }
+    } catch (e) {
+      console.error("[collab] logConflict", e);
+    }
+  }
+  async readConflictLog() {
+    try {
+      const f = `${this.app.vault.configDir}/plugins/${this.manifest.id}/conflict-log.jsonl`;
+      if (await this.app.vault.adapter.exists(f)) return await this.app.vault.adapter.read(f);
+    } catch (e) {
+    }
+    return "";
   }
   async saveConflictCopy(pNfc, content, mtime, tag) {
     const dot = pNfc.lastIndexOf(".");
@@ -11544,8 +11604,8 @@ var SyncGateModal = class extends import_obsidian.Modal {
   }
   onOpen() {
     const { contentEl, modalEl } = this;
-    const x = modalEl.querySelector(".modal-close-button");
-    if (x) x.remove();
+    modalEl.addClass("mod-collab-syncgate");
+    modalEl.querySelectorAll(".modal-close-button").forEach((x) => x.remove());
     contentEl.createEl("h3", { text: "\u{1F504} \uB3D9\uAE30\uD654 \uC911" });
     contentEl.createEl("p", { text: "\uB2E4\uB978 \uAE30\uAE30\uC758 \uBCC0\uACBD\uC0AC\uD56D\uC744 \uBC1B\uC544\uC624\uB294 \uC911\uC785\uB2C8\uB2E4. \uC644\uB8CC\uB418\uBA74 \uC790\uB3D9\uC73C\uB85C \uB2EB\uD788\uACE0 \uD3B8\uC9D1\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4." });
     const wrap = contentEl.createDiv();
@@ -11591,6 +11651,48 @@ var AlertModal = class extends import_obsidian.Modal {
     const ok = row.createEl("button", { text: "\uD655\uC778" });
     ok.classList.add("mod-cta");
     ok.onclick = () => this.close();
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+var ConflictLogModal = class extends import_obsidian.Modal {
+  constructor(app, text2) {
+    super(app);
+    this.text = text2 || "";
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl("h3", { text: "\u{1F4DB} \uCDA9\uB3CC \uB85C\uADF8" });
+    const lines = this.text.split("\n").filter(Boolean);
+    if (!lines.length) {
+      contentEl.createEl("p", { text: "\uAE30\uB85D\uB41C \uCDA9\uB3CC\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. \u{1F389}" });
+      return;
+    }
+    const info = contentEl.createEl("p", { text: `\uCD5C\uADFC ${Math.min(lines.length, 50)}\uAC74 \uD45C\uC2DC (\uCD1D ${lines.length}\uAC74 \uAE30\uB85D)` });
+    info.style.color = "var(--text-muted)";
+    const box = contentEl.createDiv();
+    box.style.cssText = "max-height:60vh;overflow:auto;";
+    for (const ln of lines.slice(-50).reverse()) {
+      let r;
+      try {
+        r = JSON.parse(ln);
+      } catch (e) {
+        continue;
+      }
+      const d = box.createDiv();
+      d.style.cssText = "border-top:1px solid var(--background-modifier-border);padding:8px 2px;";
+      const h = d.createEl("div", { text: `${r.t}  \xB7  ${(r.path || "").split("/").pop()}` });
+      h.style.fontWeight = "600";
+      const meta = `\uACBD\uB85C: ${r.path}
+\uC9C0\uC810: ${r.where} \xB7 collab\uC5F4\uB9BC: ${r.collabOpen} \xB7 \uC11C\uBC84\uC791\uC131\uC790: ${r.serverLastEditor || "(\uC5C6\uC74C)"} \xB7 \uAE30\uAE30: ${r.device}
+\uAE38\uC774 base/local/server: ${r.baseLen}/${r.localLen}/${r.serverLen} \xB7 \uB85C\uCEEC\uBCC0\uACBD:${r.localChanged} \uC11C\uBC84\uBCC0\uACBD:${r.serverChanged}
+\uCCAB \uBD88\uC77C\uCE58 #${r.firstDiff}
+  \uB85C\uCEEC: \u2026${r.aroundLocal}\u2026
+  \uC11C\uBC84: \u2026${r.aroundServer}\u2026`;
+      const pre = d.createEl("pre", { text: meta });
+      pre.style.cssText = "white-space:pre-wrap;margin:4px 0 0;font-size:12px;color:var(--text-muted);";
+    }
   }
   onClose() {
     this.contentEl.empty();

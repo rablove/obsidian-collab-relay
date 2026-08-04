@@ -46,6 +46,7 @@ const COLLAB_CSS = `
   box-shadow: 0 1px 4px rgba(0,0,0,.28) !important; transition: opacity .15s ease !important; pointer-events: none !important;
 }
 .cm-ySelection { border-radius: 2px; }
+.modal.mod-collab-syncgate .modal-close-button { display: none !important; }
 `;
 
 export default class VaultSyncCollab extends Plugin {
@@ -76,6 +77,7 @@ export default class VaultSyncCollab extends Plugin {
     this.addCommand({ id: 'hard-reset', name: '처음부터 다시 받기(로컬 삭제 후 서버본으로)', callback: () => new ConfirmModal(this.app, '처음부터 다시 받기', '이 기기의 로컬 .md 노트를 전부 삭제하고 서버 최신본으로 덮어씁니다. 되돌릴 수 없습니다. 계속할까요?', () => this.hardReset()).open() });
     this.addCommand({ id: 'collab-status', name: '공동편집 참여자', callback: () => new ParticipantModal(this.app, this).open() });
     this.addCommand({ id: 'net-check', name: '연결 상태 확인(온라인/오프라인)', callback: async () => { const ok = await this.probeNet(); this.setNet(ok); new Notice(ok ? '🌐 서버 연결됨 (온라인)' : '🔒 서버 연결 안됨 (오프라인 — 편집잠금 대상)', 5000); } });
+    this.addCommand({ id: 'conflict-log', name: '충돌 로그 보기', callback: async () => new ConflictLogModal(this.app, await this.readConflictLog()).open() });
 
     this.app.workspace.onLayoutReady(async () => {
       // 파일동기화 이벤트
@@ -165,6 +167,7 @@ export default class VaultSyncCollab extends Plugin {
       const server = (cur.status === 200 && cur.json) ? cur.json : null;
       const base = this.shadow.get(pNfc);
       if (server && !server.deleted && server.content !== undefined && server.content !== content && base !== undefined && server.content !== base) {
+        await this.logConflict(pNfc, 'upsert', base, content, server.content, mtime, server.mtime || 0, server.lastEditor);
         if (mtime >= (server.mtime || 0)) { await this.saveConflictCopy(pNfc, server.content, server.mtime || Date.now(), 'server'); }
         else { await this.saveConflictCopy(pNfc, content, mtime, this.settings.deviceId || 'local'); await this.writeLocal(pNfc, server.content); this.shadow.set(pNfc, server.content); return; }
       }
@@ -298,6 +301,7 @@ export default class VaultSyncCollab extends Plugin {
       if (local === base) { await this.writeLocal(p, R); this.shadow.set(p, R); return true; }  // 서버만 바뀜 → 서버로
       // 기준선 대비 양쪽 다 바뀜 → 진짜 동시편집 충돌 → 사본 보관
       const st = await this.app.vault.adapter.stat(p); const lm = st ? st.mtime : 0;
+      await this.logConflict(p, 'applyRemote', base, local, R, lm, doc.mtime || 0, doc.lastEditor);
       if ((doc.mtime || 0) >= lm) { await this.saveConflictCopy(p, local, lm, this.settings.deviceId || 'local'); await this.writeLocal(p, R); this.shadow.set(p, R); }
       else { await this.saveConflictCopy(p, R, doc.mtime || 0, 'server'); await this.putDoc(p, local, lm); }
       return true;
@@ -323,6 +327,27 @@ export default class VaultSyncCollab extends Plugin {
   }
   async writeLocal(p, content) { await this.ensureParent(p); this.applying = true; try { await this.app.vault.adapter.write(p, content); } finally { this.applying = false; } }
   tstamp() { const d = new Date(), z = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}${z(d.getMinutes())}`; }
+  _diffAt(a, b) { a = a || ''; b = b || ''; let i = 0; const m = Math.min(a.length, b.length); while (i < m && a[i] === b[i]) i++; return { i, local: a.slice(Math.max(0, i - 14), i + 14), server: b.slice(Math.max(0, i - 14), i + 14) }; }
+  async logConflict(p, where, base, local, server, localMtime, serverMtime, serverLastEditor) {
+    try {
+      const d = this._diffAt(local, server);
+      const rec = { t: new Date().toISOString(), where, path: p,
+        baseLen: (base || '').length, localLen: (local || '').length, serverLen: (server || '').length,
+        localChanged: (base || '') !== (local || ''), serverChanged: (base || '') !== (server || ''),
+        localMtime, serverMtime, serverLastEditor: serverLastEditor || null,
+        firstDiff: d.i, aroundLocal: d.local, aroundServer: d.server,
+        collabOpen: nfc(p) === this.collabPath, deviceId: this.settings.deviceId, device: this.settings.deviceLabel, user: this.settings.username };
+      console.warn('[collab] 충돌 로그', rec);
+      const f = `${this.app.vault.configDir}/plugins/${this.manifest.id}/conflict-log.jsonl`;
+      const line = JSON.stringify(rec) + '\n';
+      try { await this.app.vault.adapter.append(f, line); }
+      catch (e) { let prev = ''; try { if (await this.app.vault.adapter.exists(f)) prev = await this.app.vault.adapter.read(f); } catch (e2) {} await this.app.vault.adapter.write(f, prev + line); }
+    } catch (e) { console.error('[collab] logConflict', e); }
+  }
+  async readConflictLog() {
+    try { const f = `${this.app.vault.configDir}/plugins/${this.manifest.id}/conflict-log.jsonl`; if (await this.app.vault.adapter.exists(f)) return await this.app.vault.adapter.read(f); } catch (e) {}
+    return '';
+  }
   async saveConflictCopy(pNfc, content, mtime, tag) {
     const dot = pNfc.lastIndexOf('.'); const ext = dot > 0 ? pNfc.slice(dot) : '.md'; const bare = dot > 0 ? pNfc.slice(0, dot) : pNfc;
     const cp = `${bare} (충돌 ${tag} ${this.tstamp()})${ext}`;
@@ -689,7 +714,8 @@ class SyncGateModal extends Modal {
   constructor(app) { super(app); this.allowClose = false; this.done = 0; this.total = 0; }
   onOpen() {
     const { contentEl, modalEl } = this;
-    const x = modalEl.querySelector('.modal-close-button'); if (x) x.remove();   // X 버튼 제거 → 수동 닫기 불가
+    modalEl.addClass('mod-collab-syncgate');   // CSS 로 X 버튼 숨김(타이밍 무관)
+    modalEl.querySelectorAll('.modal-close-button').forEach((x) => x.remove());   // + JS 로도 제거 → 수동 닫기 불가
     contentEl.createEl('h3', { text: '🔄 동기화 중' });
     contentEl.createEl('p', { text: '다른 기기의 변경사항을 받아오는 중입니다. 완료되면 자동으로 닫히고 편집할 수 있습니다.' });
     const wrap = contentEl.createDiv();
@@ -720,6 +746,25 @@ class AlertModal extends Modal {
     row.style.display = 'flex'; row.style.justifyContent = 'flex-end';
     const ok = row.createEl('button', { text: '확인' }); ok.classList.add('mod-cta');
     ok.onclick = () => this.close();
+  }
+  onClose() { this.contentEl.empty(); }
+}
+class ConflictLogModal extends Modal {
+  constructor(app, text) { super(app); this.text = text || ''; }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl('h3', { text: '📛 충돌 로그' });
+    const lines = this.text.split('\n').filter(Boolean);
+    if (!lines.length) { contentEl.createEl('p', { text: '기록된 충돌이 없습니다. 🎉' }); return; }
+    const info = contentEl.createEl('p', { text: `최근 ${Math.min(lines.length, 50)}건 표시 (총 ${lines.length}건 기록)` }); info.style.color = 'var(--text-muted)';
+    const box = contentEl.createDiv(); box.style.cssText = 'max-height:60vh;overflow:auto;';
+    for (const ln of lines.slice(-50).reverse()) {
+      let r; try { r = JSON.parse(ln); } catch (e) { continue; }
+      const d = box.createDiv(); d.style.cssText = 'border-top:1px solid var(--background-modifier-border);padding:8px 2px;';
+      const h = d.createEl('div', { text: `${r.t}  ·  ${(r.path || '').split('/').pop()}` }); h.style.fontWeight = '600';
+      const meta = `경로: ${r.path}\n지점: ${r.where} · collab열림: ${r.collabOpen} · 서버작성자: ${r.serverLastEditor || '(없음)'} · 기기: ${r.device}\n길이 base/local/server: ${r.baseLen}/${r.localLen}/${r.serverLen} · 로컬변경:${r.localChanged} 서버변경:${r.serverChanged}\n첫 불일치 #${r.firstDiff}\n  로컬: …${r.aroundLocal}…\n  서버: …${r.aroundServer}…`;
+      const pre = d.createEl('pre', { text: meta }); pre.style.cssText = 'white-space:pre-wrap;margin:4px 0 0;font-size:12px;color:var(--text-muted);';
+    }
   }
   onClose() { this.contentEl.empty(); }
 }
