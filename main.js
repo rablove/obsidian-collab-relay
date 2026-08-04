@@ -10373,10 +10373,8 @@ var DEFAULTS = {
   deviceId: "",
   autoUpdate: true,
   // 시작·재연결 시 GitHub 최신 릴리스로 자동 업데이트
-  ghToken: "",
+  ghToken: ""
   // (레거시) 예전 비공개 repo 자동업뎃용 — 공개 전환 후 불필요
-  vaultClientKey: ""
-  // 서버(nginx) X-Vault-Client 관문 통과용 열쇠 — 기기마다 1회 입력(공개 배포이므로 코드에 상수로 두지 않는다)
 };
 var UPDATE_REPO = "rablove/obsidian-collab-relay";
 var nfc = (s) => s.normalize("NFC");
@@ -10477,7 +10475,6 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   async req(method, path, body) {
     const base = (this.settings.couchUrl || "").replace(/\/$/, "");
     const headers = { "Authorization": "Basic " + b64(`${this.settings.username}:${this.settings.password}`) };
-    if (this.settings.vaultClientKey) headers["X-Vault-Client"] = this.settings.vaultClientKey;
     if (body !== void 0) headers["Content-Type"] = "application/json";
     return (0, import_obsidian.requestUrl)({ url: `${base}/${path}`, method, headers, body: body !== void 0 ? JSON.stringify(body) : void 0, throw: false });
   }
@@ -11419,8 +11416,7 @@ var SettingTab = class extends import_obsidian.PluginSettingTab {
     containerEl.createEl("h4", { text: "\uACC4\uC815 (\uB458 \uB2E4 \uACF5\uC6A9)" });
     text2("\uC544\uC774\uB514", "CouchDB \uACC4\uC815 \u2014 \uBC14\uAFBC \uB4A4 \u300C\uB85C\uADF8\uC778\u300D", "username");
     text2("\uBE44\uBC00\uBC88\uD638", "", "password", true);
-    text2("Vault \uD0A4", "\uC11C\uBC84 \uC811\uC18D \uC5F4\uC1E0 \u2014 \uCD5C\uCD08 1\uD68C\uB9CC \uC785\uB825", "vaultClientKey", true);
-    new import_obsidian.Setting(containerEl).setName("\uB85C\uADF8\uC778").setDesc("\uC544\uC774\uB514\xB7\uBE44\uBC00\uBC88\uD638\xB7Vault \uD0A4\uB97C \uB123\uC740 \uB4A4 \uB204\uB974\uC138\uC694.").addButton((b) => b.setButtonText("\uB85C\uADF8\uC778").setCta().onClick(async () => {
+    new import_obsidian.Setting(containerEl).setName("\uB85C\uADF8\uC778").setDesc("\uC544\uC774\uB514\xB7\uBE44\uBC00\uBC88\uD638\uB97C \uB123\uC740 \uB4A4 \uB204\uB974\uC138\uC694.").addButton((b) => b.setButtonText("\uB85C\uADF8\uC778").setCta().onClick(async () => {
       if (!s.username || !s.password) {
         new AlertModal(this.app, "\uB85C\uADF8\uC778 \uC815\uBCF4 \uD544\uC694", "\uC544\uC774\uB514\uC640 \uBE44\uBC00\uBC88\uD638\uB97C \uBAA8\uB450 \uC785\uB825\uD55C \uB4A4 \uB85C\uADF8\uC778\uD558\uC138\uC694.").open();
         return;

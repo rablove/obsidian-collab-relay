@@ -26,7 +26,6 @@ const DEFAULTS = {
   deviceId: '',
   autoUpdate: true,   // 시작·재연결 시 GitHub 최신 릴리스로 자동 업데이트
   ghToken: '',        // (레거시) 예전 비공개 repo 자동업뎃용 — 공개 전환 후 불필요
-  vaultClientKey: '', // 서버(nginx) X-Vault-Client 관문 통과용 열쇠 — 기기마다 1회 입력(공개 배포이므로 코드에 상수로 두지 않는다)
 };
 const UPDATE_REPO = 'rablove/obsidian-collab-relay';   // 자체 업데이트 대상(공개 repo → 토큰 불필요)
 const nfc = (s) => s.normalize('NFC');
@@ -98,7 +97,6 @@ export default class VaultSyncCollab extends Plugin {
   async req(method, path, body) {
     const base = (this.settings.couchUrl || '').replace(/\/$/, '');
     const headers = { 'Authorization': 'Basic ' + b64(`${this.settings.username}:${this.settings.password}`) };
-    if (this.settings.vaultClientKey) headers['X-Vault-Client'] = this.settings.vaultClientKey;
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     return requestUrl({ url: `${base}/${path}`, method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, throw: false });
   }
@@ -620,8 +618,7 @@ class SettingTab extends PluginSettingTab {
     containerEl.createEl('h4', { text: '계정 (둘 다 공용)' });
     text('아이디', 'CouchDB 계정 — 바꾼 뒤 「로그인」', 'username');
     text('비밀번호', '', 'password', true);
-    text('Vault 키', '서버 접속 열쇠 — 최초 1회만 입력', 'vaultClientKey', true);
-    new Setting(containerEl).setName('로그인').setDesc('아이디·비밀번호·Vault 키를 넣은 뒤 누르세요.')
+    new Setting(containerEl).setName('로그인').setDesc('아이디·비밀번호를 넣은 뒤 누르세요.')
       .addButton(b => b.setButtonText('로그인').setCta().onClick(async () => { if (!s.username || !s.password) { new AlertModal(this.app, '로그인 정보 필요', '아이디와 비밀번호를 모두 입력한 뒤 로그인하세요.').open(); return; } set('로그인 중…'); new Notice('로그인 중…'); try { const r = await this.plugin.relogin(); set(r.msg, r.ok); new Notice(r.msg); } catch (e) { set('오류: ' + (e && e.message), false); new Notice('로그인 오류: ' + (e && e.message)); } }));
 
     containerEl.createEl('h4', { text: '자동 업데이트' });
