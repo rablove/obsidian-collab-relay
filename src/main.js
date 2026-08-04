@@ -26,6 +26,7 @@ const DEFAULTS = {
   deviceId: '',
   autoUpdate: true,   // 시작·재연결 시 GitHub 최신 릴리스로 자동 업데이트
   ghToken: '',        // (레거시) 예전 비공개 repo 자동업뎃용 — 공개 전환 후 불필요
+  installedVersion: '',   // 방금 적용한 버전 — 리로드 후 manifest 캐시가 옛 버전이어도 재적용 루프 방지
 };
 const UPDATE_REPO = 'rablove/obsidian-collab-relay';   // 자체 업데이트 대상(공개 repo → 토큰 불필요)
 const nfc = (s) => s.normalize('NFC');
@@ -454,7 +455,8 @@ export default class VaultSyncCollab extends Plugin {
       const rel = await requestUrl({ url: `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, headers: hdr, throw: false });
       if (rel.status !== 200 || !rel.json) return;
       const latest = String(rel.json.tag_name || '').replace(/^v/, '');
-      if (!latest || !this._isNewer(latest, this.manifest.version)) return;
+      const applied = (this.settings.installedVersion && this._isNewer(this.settings.installedVersion, this.manifest.version)) ? this.settings.installedVersion : this.manifest.version;
+      if (!latest || !this._isNewer(latest, applied)) return;
       this._updating = true;
       const assets = rel.json.assets || [];
       const grab = async (name) => {
@@ -469,7 +471,9 @@ export default class VaultSyncCollab extends Plugin {
       const dir = `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
       await this.app.vault.adapter.write(`${dir}/manifest.json`, manJson);
       await this.app.vault.adapter.write(`${dir}/main.js`, mainJs);
-      new Notice(`🔄 플러그인 업데이트 ${this.manifest.version} → ${latest} · 적용 중…`, 6000);
+      this.settings.installedVersion = latest; await this.saveSettings();   // 재적용 루프 방지
+      try { this.manifest.version = latest; const m = this.app.plugins.manifests && this.app.plugins.manifests[this.manifest.id]; if (m) m.version = latest; } catch (e) {}   // 캐시된 버전도 갱신
+      new Notice(`🔄 플러그인 업데이트 → ${latest} · 적용 중…`, 6000);
       setTimeout(async () => { try { await this.app.plugins.disablePlugin(this.manifest.id); await this.app.plugins.enablePlugin(this.manifest.id); } catch (e) { this._updating = false; } }, 900);
     } catch (e) { this._updating = false; }
   }
