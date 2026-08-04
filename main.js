@@ -11152,7 +11152,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
   }
   refreshLock() {
-    const lock = this.settings.enabled && (this.isOffline() || this._gating);
+    const lock = this.settings.enabled && (this.isOffline() || this._gating || this._collabConnecting);
     if (import_obsidian.Platform.isMobile) this.applyViewLock(lock);
     const view = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
     const cm = view && view.editor && view.editor.cm;
@@ -11170,7 +11170,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         }
       }
     }
-    if (lock) this.setCollab("\u{1F512} \uC624\uD504\uB77C\uC778\xB7\uD3B8\uC9D1\uC7A0\uAE08");
+    if (lock) this.setCollab(this._collabConnecting && !this.isOffline() && !this._gating ? "\u{1F504} \uB178\uD2B8 \uB3D9\uAE30\uD654 \uC911\u2026 \uD3B8\uC9D1 \uC7A0\uAE08" : "\u{1F512} \uC624\uD504\uB77C\uC778\xB7\uD3B8\uC9D1\uC7A0\uAE08");
     else if (this._lastLock) this.setCollab(this.session && this.session.provider && this.session.provider.wsconnected ? "\uC5F0\uACB0\uB428\xB7" + this.peerCount() : "\uC5F0\uACB0 \uC548\uB428");
     this._lastLock = lock;
   }
@@ -11353,6 +11353,14 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
     const cm = view.editor && view.editor.cm;
     if (!cm) return;
+    this.collabPath = nfc(path);
+    this._collabConnecting = true;
+    this.refreshLock();
+    clearTimeout(this._connectTimer);
+    this._connectTimer = setTimeout(() => {
+      this._collabConnecting = false;
+      this.refreshLock();
+    }, 6e3);
     await this.startSession(file, cm);
     this.refreshLock();
   }
@@ -11360,6 +11368,12 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     const token = await this.getToken();
     if (!token) {
       this.setCollab("\uB85C\uADF8\uC778 \uD544\uC694");
+      this._collabConnecting = false;
+      try {
+        clearTimeout(this._connectTimer);
+      } catch (e) {
+      }
+      this.refreshLock();
       return;
     }
     const path = file.path;
@@ -11400,6 +11414,11 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       }
       if (this.session !== session) return;
       session.attached = true;
+      this._collabConnecting = false;
+      try {
+        clearTimeout(this._connectTimer);
+      } catch (e) {
+      }
       const persist = () => {
         clearTimeout(session.saveTimer);
         session.saveTimer = setTimeout(async () => {
@@ -11436,6 +11455,11 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     if (!s) return;
     this.session = null;
     this.collabPath = null;
+    this._collabConnecting = false;
+    try {
+      clearTimeout(this._connectTimer);
+    } catch (e) {
+    }
     try {
       s.cm.dispatch({ effects: this.compartment.reconfigure([]) });
     } catch (e) {

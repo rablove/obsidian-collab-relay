@@ -474,7 +474,7 @@ export default class VaultSyncCollab extends Plugin {
     } catch (e) { this._updating = false; }
   }
   refreshLock() {
-    const lock = this.settings.enabled && (this.isOffline() || this._gating);   // 오프라인·초기동기화(게이트) 중이면 편집 잠금
+    const lock = this.settings.enabled && (this.isOffline() || this._gating || this._collabConnecting);   // 오프라인·초기동기화(게이트)·노트 협업 붙는 중이면 편집 잠금
     // 모바일: CM readOnly 가 iOS 웹뷰에선 입력을 못 막는다. 그래서 노트를 «읽기 모드」로 강제 전환한다
     //  → 읽기 모드는 편집기가 아니라 렌더링 뷰라 어떤 플랫폼에서도 편집이 불가능하다. (cm 핸들 불필요)
     if (Platform.isMobile) this.applyViewLock(lock);
@@ -484,7 +484,7 @@ export default class VaultSyncCollab extends Plugin {
       let cur; try { cur = !!cm.state.readOnly; } catch (e) { cur = undefined; }
       if (cur !== lock) { try { cm.dispatch({ effects: this.editLock.reconfigure(lock ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []) }); } catch (e) {} }
     }
-    if (lock) this.setCollab('🔒 오프라인·편집잠금');
+    if (lock) this.setCollab((this._collabConnecting && !this.isOffline() && !this._gating) ? '🔄 노트 동기화 중… 편집 잠금' : '🔒 오프라인·편집잠금');
     else if (this._lastLock) this.setCollab((this.session && this.session.provider && this.session.provider.wsconnected) ? '연결됨·' + this.peerCount() : '연결 안됨');
     this._lastLock = lock;
   }
@@ -607,10 +607,14 @@ export default class VaultSyncCollab extends Plugin {
     this.endSession();
     if (!view || !file || !this.settings.wsUrl) { this.refreshLock(); return; }
     const cm = view.editor && view.editor.cm; if (!cm) return;
+    this.collabPath = nfc(path);                         // 즉시 보호: 파일동기화가 이 노트를 덮지 않게
+    this._collabConnecting = true; this.refreshLock();   // 협업이 붙기 전까지 편집 잠금(내가 친 게 나중에 덮이는 것 방지)
+    clearTimeout(this._connectTimer);
+    this._connectTimer = setTimeout(() => { this._collabConnecting = false; this.refreshLock(); }, 6000);   // 협업이 못 붙어도 6초 후 편집 허용(collabPath 로 보호된 파일동기화 모드)
     await this.startSession(file, cm); this.refreshLock();
   }
   async startSession(file, cm) {
-    const token = await this.getToken(); if (!token) { this.setCollab('로그인 필요'); return; }
+    const token = await this.getToken(); if (!token) { this.setCollab('로그인 필요'); this._collabConnecting = false; try { clearTimeout(this._connectTimer); } catch (e) {} this.refreshLock(); return; }
     const path = file.path; const ydoc = new Y.Doc();
     const room = 'note:' + b64url(path.normalize('NFC'));
     const provider = new WebsocketProvider(this.settings.wsUrl, room, ydoc, { params: { token } });
@@ -627,6 +631,7 @@ export default class VaultSyncCollab extends Plugin {
       if (ytext.length === 0) { try { const content = await this.app.vault.read(file); if (this.session !== session) return; if (content && ytext.length === 0) ydoc.transact(() => ytext.insert(0, content)); } catch (e) {} }
       if (this.session !== session) return;
       session.attached = true;
+      this._collabConnecting = false; try { clearTimeout(this._connectTimer); } catch (e) {}   // 붙었으니 편집 잠금 해제
       const persist = () => { clearTimeout(session.saveTimer); session.saveTimer = setTimeout(async () => { try { const f = this.app.vault.getAbstractFileByPath(path); if (f) { this.applying = true; try { await this.app.vault.modify(f, ytext.toString()); } finally { this.applying = false; } } } catch (e) {} }, 700); };
       session.persist = persist; ytext.observe(persist);
       try { cm.dispatch({ effects: this.compartment.reconfigure(yCollab(ytext, provider.awareness)) }); } catch (e) { console.error('[collab] attach', e); }
@@ -637,6 +642,7 @@ export default class VaultSyncCollab extends Plugin {
   }
   endSession() {
     const s = this.session; if (!s) return; this.session = null; this.collabPath = null;
+    this._collabConnecting = false; try { clearTimeout(this._connectTimer); } catch (e) {}
     try { s.cm.dispatch({ effects: this.compartment.reconfigure([]) }); } catch (e) {}
     try { clearTimeout(s.saveTimer); } catch (e) {}
     try { if (s.persist) s.ytext.unobserve(s.persist); } catch (e) {}
