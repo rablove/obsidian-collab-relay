@@ -10394,7 +10394,7 @@ var COLLAB_CSS = `
   box-shadow: 0 1px 4px rgba(0,0,0,.28) !important; transition: opacity .15s ease !important; pointer-events: none !important;
 }
 .cm-ySelection { border-radius: 2px; }
-.modal.mod-collab-syncgate .modal-close-button { display: none !important; }
+.mod-collab-syncgate .modal-close-button, .modal-container.mod-collab-syncgate .modal-close-button { display: none !important; }
 `;
 var VaultSyncCollab = class extends import_obsidian.Plugin {
   async onload() {
@@ -11627,9 +11627,10 @@ var SyncGateModal = class extends import_obsidian.Modal {
     this.total = 0;
   }
   onOpen() {
-    const { contentEl, modalEl } = this;
+    const { contentEl, modalEl, containerEl } = this;
+    containerEl.addClass("mod-collab-syncgate");
     modalEl.addClass("mod-collab-syncgate");
-    modalEl.querySelectorAll(".modal-close-button").forEach((x) => x.remove());
+    containerEl.querySelectorAll(".modal-close-button").forEach((x) => x.remove());
     contentEl.createEl("h3", { text: "\u{1F504} \uB3D9\uAE30\uD654 \uC911" });
     contentEl.createEl("p", { text: "\uB2E4\uB978 \uAE30\uAE30\uC758 \uBCC0\uACBD\uC0AC\uD56D\uC744 \uBC1B\uC544\uC624\uB294 \uC911\uC785\uB2C8\uB2E4. \uC644\uB8CC\uB418\uBA74 \uC790\uB3D9\uC73C\uB85C \uB2EB\uD788\uACE0 \uD3B8\uC9D1\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4." });
     const wrap = contentEl.createDiv();

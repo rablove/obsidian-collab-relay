@@ -46,7 +46,7 @@ const COLLAB_CSS = `
   box-shadow: 0 1px 4px rgba(0,0,0,.28) !important; transition: opacity .15s ease !important; pointer-events: none !important;
 }
 .cm-ySelection { border-radius: 2px; }
-.modal.mod-collab-syncgate .modal-close-button { display: none !important; }
+.mod-collab-syncgate .modal-close-button, .modal-container.mod-collab-syncgate .modal-close-button { display: none !important; }
 `;
 
 export default class VaultSyncCollab extends Plugin {
@@ -719,9 +719,9 @@ class SettingTab extends PluginSettingTab {
 class SyncGateModal extends Modal {
   constructor(app) { super(app); this.allowClose = false; this.done = 0; this.total = 0; }
   onOpen() {
-    const { contentEl, modalEl } = this;
-    modalEl.addClass('mod-collab-syncgate');   // CSS 로 X 버튼 숨김(타이밍 무관)
-    modalEl.querySelectorAll('.modal-close-button').forEach((x) => x.remove());   // + JS 로도 제거 → 수동 닫기 불가
+    const { contentEl, modalEl, containerEl } = this;
+    containerEl.addClass('mod-collab-syncgate'); modalEl.addClass('mod-collab-syncgate');   // 닫기(X)버튼은 .modal-container 에 있어 컨테이너에도 클래스 → CSS 로 숨김(타이밍 무관)
+    containerEl.querySelectorAll('.modal-close-button').forEach((x) => x.remove());   // 컨테이너 어디에 있든 JS 로도 제거
     contentEl.createEl('h3', { text: '🔄 동기화 중' });
     contentEl.createEl('p', { text: '다른 기기의 변경사항을 받아오는 중입니다. 완료되면 자동으로 닫히고 편집할 수 있습니다.' });
     const wrap = contentEl.createDiv();
