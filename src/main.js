@@ -25,7 +25,8 @@ const DEFAULTS = {
   lastSeq: '0',
   deviceId: '',
 };
-// 업데이트는 BRAT 으로만 (자체 자동업데이트 제거 — 리로드 루프 방지)
+// 업데이트는 BRAT 으로만(자동설치 안 함). 단 최신 버전인지 «확인」해 안 맞으면 편집을 잠근다.
+const UPDATE_REPO = 'rablove/obsidian-collab-relay';   // 버전 확인 대상(공개 repo)
 const nfc = (s) => s.normalize('NFC');
 const b64 = (s) => btoa(unescape(encodeURIComponent(s)));
 const b64url = (s) => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -84,6 +85,7 @@ export default class VaultSyncCollab extends Plugin {
       this.registerEvent(this.app.vault.on('delete', (f) => this.onLocalDelete(f.path)));
       this.registerEvent(this.app.vault.on('rename', (f, oldPath) => this.onLocalRename(f, oldPath)));
       await this.gatedSync();   // 처음 들어올 때: 전체 동기화 끝날 때까지 편집 잠금
+      this.checkVersion();      // 최신 버전인지 확인 → 안 맞으면 편집잠금 + 업데이트 모달
       this._rtRunning = true; this.longPollLoop();
       this.registerInterval(window.setInterval(() => this.syncCycle(), 60000));
       // 협업 이벤트
@@ -447,10 +449,32 @@ export default class VaultSyncCollab extends Plugin {
       new Notice(ok ? '🌐 온라인 — 편집 가능' : '🔒 오프라인 — 편집이 잠겼습니다', 4000);
     }
     this.refreshLock();
-    if (changed && ok) { this.gatedSync(); }   // 재접속 시 전체 catch-up 동안 편집 잠금
+    if (changed && ok) { this.gatedSync(); this.checkVersion(); }   // 재접속 시 catch-up + 버전확인
+  }
+  _isNewer(a, b) {
+    const pa = String(a).replace(/^v/, '').split('.').map(n => parseInt(n) || 0);
+    const pb = String(b).replace(/^v/, '').split('.').map(n => parseInt(n) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) { const x = pa[i] || 0, y = pb[i] || 0; if (x !== y) return x > y; }
+    return false;
+  }
+  async checkVersion() {   // 온라인일 때 최신 릴리스와 설치버전 비교 — 낮으면 _outdated=true → 편집잠금 + 모달(설치는 BRAT)
+    try {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      const now = Date.now();
+      if (this._verChk && now - this._verChk < 10 * 60 * 1000) return;   // 10분 쿨다운
+      this._verChk = now;
+      const rel = await requestUrl({ url: `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, headers: { 'Accept': 'application/vnd.github+json' }, throw: false });
+      if (rel.status !== 200 || !rel.json) return;
+      const latest = String(rel.json.tag_name || '').replace(/^v/, '');
+      const outdated = !!latest && this._isNewer(latest, this.manifest.version);
+      this._latestVer = latest;
+      if (outdated !== this._outdated) { this._outdated = outdated; this.refreshLock(); }
+      if (outdated && !this._updShown) { this._updShown = true; try { new UpdateModal(this.app, this.manifest.version, latest).open(); } catch (e) {} }
+      if (!outdated) this._updShown = false;
+    } catch (e) {}
   }
   refreshLock() {
-    const lock = this.settings.enabled && (this.isOffline() || this._gating || this._collabConnecting);   // 오프라인·초기동기화(게이트)·노트 협업 붙는 중이면 편집 잠금
+    const lock = this.settings.enabled && (this.isOffline() || this._gating || this._collabConnecting || this._outdated);   // 오프라인·초기동기화·협업연결중·구버전이면 편집 잠금
     // 모바일: CM readOnly 가 iOS 웹뷰에선 입력을 못 막는다. 그래서 노트를 «읽기 모드」로 강제 전환한다
     //  → 읽기 모드는 편집기가 아니라 렌더링 뷰라 어떤 플랫폼에서도 편집이 불가능하다. (cm 핸들 불필요)
     if (Platform.isMobile) this.applyViewLock(lock);
@@ -460,7 +484,7 @@ export default class VaultSyncCollab extends Plugin {
       let cur; try { cur = !!cm.state.readOnly; } catch (e) { cur = undefined; }
       if (cur !== lock) { try { cm.dispatch({ effects: this.editLock.reconfigure(lock ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []) }); } catch (e) {} }
     }
-    if (lock) this.setCollab((this._collabConnecting && !this.isOffline() && !this._gating) ? '🔄 노트 동기화 중… 편집 잠금' : '🔒 오프라인·편집잠금');
+    if (lock) this.setCollab(this._outdated ? ('🔺 업데이트 필요 → ' + (this._latestVer || '') + ' · 편집잠금') : (this._collabConnecting && !this.isOffline() && !this._gating) ? '🔄 노트 동기화 중… 편집 잠금' : '🔒 오프라인·편집잠금');
     else if (this._lastLock) this.setCollab((this.session && this.session.provider && this.session.provider.wsconnected) ? '연결됨·' + this.peerCount() : '연결 안됨');
     this._lastLock = lock;
   }
@@ -689,6 +713,18 @@ class SettingTab extends PluginSettingTab {
   }
 }
 
+class UpdateModal extends Modal {
+  constructor(app, cur, latest) { super(app); this.cur = cur; this.latest = latest; }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl('h3', { text: '🔺 플러그인 업데이트 필요' });
+    contentEl.createEl('p', { text: `설치됨 ${this.cur} → 최신 ${this.latest}. 버전이 다르면 동기화 사고가 날 수 있어 편집을 잠갔습니다.` });
+    const g = contentEl.createEl('p', { text: 'BRAT → «Check for updates to all beta plugins» 로 업데이트한 뒤 Obsidian 을 재시작하세요.' }); g.style.color = 'var(--text-muted)';
+    const row = contentEl.createDiv(); row.style.cssText = 'display:flex;justify-content:flex-end;margin-top:8px';
+    const ok = row.createEl('button', { text: '확인' }); ok.classList.add('mod-cta'); ok.onclick = () => this.close();
+  }
+  onClose() { this.contentEl.empty(); }
+}
 class SyncGateModal extends Modal {
   constructor(app) { super(app); this.allowClose = false; this.done = 0; this.total = 0; }
   onOpen() {

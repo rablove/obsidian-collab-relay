@@ -283,7 +283,7 @@ var MIN_SAFE_INTEGER = Number.MIN_SAFE_INTEGER;
 var LOWEST_INT32 = 1 << 31;
 var isInteger = Number.isInteger || ((num) => typeof num === "number" && isFinite(num) && floor(num) === num);
 var isNaN2 = Number.isNaN;
-var parseInt = Number.parseInt;
+var parseInt2 = Number.parseInt;
 
 // node_modules/lib0/string.js
 var fromCharCode = String.fromCharCode;
@@ -10372,6 +10372,7 @@ var DEFAULTS = {
   lastSeq: "0",
   deviceId: ""
 };
+var UPDATE_REPO = "rablove/obsidian-collab-relay";
 var nfc = (s) => s.normalize("NFC");
 var b64 = (s) => btoa(unescape(encodeURIComponent(s)));
 var b64url = (s) => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -10446,6 +10447,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       this.registerEvent(this.app.vault.on("delete", (f) => this.onLocalDelete(f.path)));
       this.registerEvent(this.app.vault.on("rename", (f, oldPath) => this.onLocalRename(f, oldPath)));
       await this.gatedSync();
+      this.checkVersion();
       this._rtRunning = true;
       this.longPollLoop();
       this.registerInterval(window.setInterval(() => this.syncCycle(), 6e4));
@@ -11122,10 +11124,46 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     this.refreshLock();
     if (changed && ok) {
       this.gatedSync();
+      this.checkVersion();
+    }
+  }
+  _isNewer(a, b) {
+    const pa = String(a).replace(/^v/, "").split(".").map((n) => parseInt(n) || 0);
+    const pb = String(b).replace(/^v/, "").split(".").map((n) => parseInt(n) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const x = pa[i] || 0, y = pb[i] || 0;
+      if (x !== y) return x > y;
+    }
+    return false;
+  }
+  async checkVersion() {
+    try {
+      if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+      const now = Date.now();
+      if (this._verChk && now - this._verChk < 10 * 60 * 1e3) return;
+      this._verChk = now;
+      const rel = await (0, import_obsidian.requestUrl)({ url: `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, headers: { "Accept": "application/vnd.github+json" }, throw: false });
+      if (rel.status !== 200 || !rel.json) return;
+      const latest = String(rel.json.tag_name || "").replace(/^v/, "");
+      const outdated = !!latest && this._isNewer(latest, this.manifest.version);
+      this._latestVer = latest;
+      if (outdated !== this._outdated) {
+        this._outdated = outdated;
+        this.refreshLock();
+      }
+      if (outdated && !this._updShown) {
+        this._updShown = true;
+        try {
+          new UpdateModal(this.app, this.manifest.version, latest).open();
+        } catch (e) {
+        }
+      }
+      if (!outdated) this._updShown = false;
+    } catch (e) {
     }
   }
   refreshLock() {
-    const lock = this.settings.enabled && (this.isOffline() || this._gating || this._collabConnecting);
+    const lock = this.settings.enabled && (this.isOffline() || this._gating || this._collabConnecting || this._outdated);
     if (import_obsidian.Platform.isMobile) this.applyViewLock(lock);
     const view = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
     const cm = view && view.editor && view.editor.cm;
@@ -11143,7 +11181,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         }
       }
     }
-    if (lock) this.setCollab(this._collabConnecting && !this.isOffline() && !this._gating ? "\u{1F504} \uB178\uD2B8 \uB3D9\uAE30\uD654 \uC911\u2026 \uD3B8\uC9D1 \uC7A0\uAE08" : "\u{1F512} \uC624\uD504\uB77C\uC778\xB7\uD3B8\uC9D1\uC7A0\uAE08");
+    if (lock) this.setCollab(this._outdated ? "\u{1F53A} \uC5C5\uB370\uC774\uD2B8 \uD544\uC694 \u2192 " + (this._latestVer || "") + " \xB7 \uD3B8\uC9D1\uC7A0\uAE08" : this._collabConnecting && !this.isOffline() && !this._gating ? "\u{1F504} \uB178\uD2B8 \uB3D9\uAE30\uD654 \uC911\u2026 \uD3B8\uC9D1 \uC7A0\uAE08" : "\u{1F512} \uC624\uD504\uB77C\uC778\xB7\uD3B8\uC9D1\uC7A0\uAE08");
     else if (this._lastLock) this.setCollab(this.session && this.session.provider && this.session.provider.wsconnected ? "\uC5F0\uACB0\uB428\xB7" + this.peerCount() : "\uC5F0\uACB0 \uC548\uB428");
     this._lastLock = lock;
   }
@@ -11579,6 +11617,28 @@ var SettingTab = class extends import_obsidian.PluginSettingTab {
         () => this.plugin.hardReset()
       ).open();
     }));
+  }
+};
+var UpdateModal = class extends import_obsidian.Modal {
+  constructor(app, cur, latest) {
+    super(app);
+    this.cur = cur;
+    this.latest = latest;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl("h3", { text: "\u{1F53A} \uD50C\uB7EC\uADF8\uC778 \uC5C5\uB370\uC774\uD2B8 \uD544\uC694" });
+    contentEl.createEl("p", { text: `\uC124\uCE58\uB428 ${this.cur} \u2192 \uCD5C\uC2E0 ${this.latest}. \uBC84\uC804\uC774 \uB2E4\uB974\uBA74 \uB3D9\uAE30\uD654 \uC0AC\uACE0\uAC00 \uB0A0 \uC218 \uC788\uC5B4 \uD3B8\uC9D1\uC744 \uC7A0\uAC14\uC2B5\uB2C8\uB2E4.` });
+    const g = contentEl.createEl("p", { text: "BRAT \u2192 \xABCheck for updates to all beta plugins\xBB \uB85C \uC5C5\uB370\uC774\uD2B8\uD55C \uB4A4 Obsidian \uC744 \uC7AC\uC2DC\uC791\uD558\uC138\uC694." });
+    g.style.color = "var(--text-muted)";
+    const row = contentEl.createDiv();
+    row.style.cssText = "display:flex;justify-content:flex-end;margin-top:8px";
+    const ok = row.createEl("button", { text: "\uD655\uC778" });
+    ok.classList.add("mod-cta");
+    ok.onclick = () => this.close();
+  }
+  onClose() {
+    this.contentEl.empty();
   }
 };
 var SyncGateModal = class extends import_obsidian.Modal {
