@@ -189,9 +189,10 @@ export default class VaultSyncCollab extends Plugin {
   }
 
   async putDoc(pNfc, content, mtime) {
+    if (this._outdated) return false;   // 구버전이면 pull-only — 어긋난 내용을 서버(정본)에 밀어넣지 않는다(서버 업로드 게이트의 클라이언트쪽 짝)
     const id = this.idFor(pNfc);
     const cur = await this.req('GET', this.docUrl(id));
-    const doc = { _id: id, path: pNfc, content, mtime, deleted: false, lastEditor: this.settings.username };
+    const doc = { _id: id, path: pNfc, content, mtime, deleted: false, lastEditor: this.settings.username, clientVersion: this.manifest.version };
     if (cur.status === 200 && cur.json && cur.json._rev) doc._rev = cur.json._rev;
     const put = await this.req('PUT', this.docUrl(id), doc);
     if (put.status === 200 || put.status === 201) { this.shadow.set(pNfc, content); return true; }
@@ -218,10 +219,11 @@ export default class VaultSyncCollab extends Plugin {
   }
   async markDeleted(pNfc) {
     try {
+      if (this._outdated) return;   // 구버전이면 pull-only — 삭제 전파도 서버에 밀어넣지 않는다
       const id = this.idFor(pNfc);
       const cur = await this.req('GET', this.docUrl(id));
       if (cur.status !== 200 || !cur.json) return;
-      const doc = cur.json; doc.deleted = true; doc.content = ''; doc.mtime = Date.now();
+      const doc = cur.json; doc.deleted = true; doc.content = ''; doc.mtime = Date.now(); doc.clientVersion = this.manifest.version;
       await this.req('PUT', this.docUrl(id), doc);
     } catch (e) { console.error('[sync] markDeleted', e); }
   }

@@ -10643,9 +10643,10 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     if (this.isMd(file)) await this.onLocal(file);
   }
   async putDoc(pNfc, content, mtime) {
+    if (this._outdated) return false;
     const id2 = this.idFor(pNfc);
     const cur = await this.req("GET", this.docUrl(id2));
-    const doc2 = { _id: id2, path: pNfc, content, mtime, deleted: false, lastEditor: this.settings.username };
+    const doc2 = { _id: id2, path: pNfc, content, mtime, deleted: false, lastEditor: this.settings.username, clientVersion: this.manifest.version };
     if (cur.status === 200 && cur.json && cur.json._rev) doc2._rev = cur.json._rev;
     const put = await this.req("PUT", this.docUrl(id2), doc2);
     if (put.status === 200 || put.status === 201) {
@@ -10692,6 +10693,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   }
   async markDeleted(pNfc) {
     try {
+      if (this._outdated) return;
       const id2 = this.idFor(pNfc);
       const cur = await this.req("GET", this.docUrl(id2));
       if (cur.status !== 200 || !cur.json) return;
@@ -10699,6 +10701,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       doc2.deleted = true;
       doc2.content = "";
       doc2.mtime = Date.now();
+      doc2.clientVersion = this.manifest.version;
       await this.req("PUT", this.docUrl(id2), doc2);
     } catch (e) {
       console.error("[sync] markDeleted", e);
