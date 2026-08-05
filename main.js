@@ -10469,7 +10469,7 @@ var COLLAB_CSS = `
   box-shadow: 0 1px 4px rgba(0,0,0,.28) !important; transition: opacity .15s ease !important; pointer-events: none !important;
 }
 .cm-ySelection { border-radius: 2px; }
-body.collab-syncgate-open .modal-close-button { display: none !important; }
+body.collab-syncgate-open .modal-close-button, body.collab-harnesslock-open .modal-close-button { display: none !important; }
 `;
 var VaultSyncCollab = class extends import_obsidian.Plugin {
   async onload() {
@@ -11256,7 +11256,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
   }
   refreshLock() {
-    const lock = this.settings.enabled && (this.isOffline() || this._gating || this._collabConnecting || this._outdated || this._dupName);
+    const lock = this.settings.enabled && (this.isOffline() || this._gating || this._collabConnecting || this._outdated || this._dupName || this._harnessLock);
     if (import_obsidian.Platform.isMobile) this.applyViewLock(lock);
     const view = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
     const cm = view && view.editor && view.editor.cm;
@@ -11274,7 +11274,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         }
       }
     }
-    if (lock) this.setCollab(this._dupName ? "\u{1F534} \uAE30\uAE30 \uC774\uB984 \xAB" + this.settings.deviceLabel + "\xBB \uC911\uBCF5 \u2014 \uC774\uB984 \uBC14\uAFD4\uC57C \uD3B8\uC9D1\xB7\uB3D9\uAE30\uD654" : this._outdated ? "\u{1F53A} \uC5C5\uB370\uC774\uD2B8 \uD544\uC694 \u2192 " + (this._latestVer || "") + " \xB7 \uD3B8\uC9D1\uC7A0\uAE08" : this._collabConnecting && !this.isOffline() && !this._gating ? "\u{1F504} \uB178\uD2B8 \uB3D9\uAE30\uD654 \uC911\u2026 \uD3B8\uC9D1 \uC7A0\uAE08" : "\u{1F512} \uC624\uD504\uB77C\uC778\xB7\uD3B8\uC9D1\uC7A0\uAE08");
+    if (lock) this.setCollab(this._dupName ? "\u{1F534} \uAE30\uAE30 \uC774\uB984 \xAB" + this.settings.deviceLabel + "\xBB \uC911\uBCF5 \u2014 \uC774\uB984 \uBC14\uAFD4\uC57C \uD3B8\uC9D1\xB7\uB3D9\uAE30\uD654" : this._outdated ? "\u{1F53A} \uC5C5\uB370\uC774\uD2B8 \uD544\uC694 \u2192 " + (this._latestVer || "") + " \xB7 \uD3B8\uC9D1\uC7A0\uAE08" : this._harnessLock ? "\u{1F916} \uD558\uB124\uC2A4\uAC00 \uC815\uB9AC\uD558\uB294 \uC911\u2026 \uC7A0\uC2DC \uD3B8\uC9D1 \uC7A0\uAE08" : this._collabConnecting && !this.isOffline() && !this._gating ? "\u{1F504} \uB178\uD2B8 \uB3D9\uAE30\uD654 \uC911\u2026 \uD3B8\uC9D1 \uC7A0\uAE08" : "\u{1F512} \uC624\uD504\uB77C\uC778\xB7\uD3B8\uC9D1\uC7A0\uAE08");
     else if (this._lastLock) this.setCollab(this.session && this.session.provider && this.session.provider.wsconnected ? "\uC5F0\uACB0\uB428\xB7" + this.peerCount() : "\uC5F0\uACB0 \uC548\uB428");
     this._lastLock = lock;
   }
@@ -11309,7 +11309,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     const token = await this.getToken();
     if (!token) return;
     this._presenceDoc = new Doc();
-    this.presence = new WebsocketProvider(this.settings.wsUrl, "__presence__", this._presenceDoc, { params: { token } });
+    this.presence = new WebsocketProvider(this.settings.wsUrl, "__presence__", this._presenceDoc, { params: { token, v: this.manifest.version } });
     this.presence.awareness.setLocalStateField("user", { name: `${this.settings.username}\xB7${this.settings.deviceLabel}`, color: this.userColor, login: this.settings.username, device: this.settings.deviceLabel, deviceId: this.settings.deviceId });
     this.updatePresencePath();
     this.presence.awareness.on("change", () => this.onPresenceChange());
@@ -11529,8 +11529,9 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     const path = file.path;
     const ydoc = new Doc();
     const room = "note:" + b64url(path.normalize("NFC"));
-    const provider = new WebsocketProvider(this.settings.wsUrl, room, ydoc, { params: { token } });
+    const provider = new WebsocketProvider(this.settings.wsUrl, room, ydoc, { params: { token, v: this.manifest.version } });
     const ytext = ydoc.getText("content");
+    const meta = ydoc.getMap("meta");
     const label = `${this.settings.username}\xB7${this.settings.deviceLabel}`;
     provider.awareness.setLocalStateField("user", { name: label, color: this.userColor, colorLight: this.userColor + "40", login: this.settings.username });
     const session = { path, ydoc, provider, ytext, cm, attached: false, saveTimer: null, onSync: null, persist: null };
@@ -11599,6 +11600,33 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     };
     session.onSync = onSync;
     provider.on("sync", onSync);
+    const onMeta = () => {
+      if (this.session !== session) return;
+      const locked = !!meta.get("lock");
+      if (locked === !!this._harnessLock) return;
+      this._harnessLock = locked;
+      this.refreshLock();
+      if (locked) {
+        if (!this._hlModal) {
+          try {
+            this._hlModal = new HarnessLockModal(this.app);
+            this._hlModal.open();
+          } catch (e) {
+          }
+        }
+      } else if (this._hlModal) {
+        try {
+          this._hlModal.allowClose = true;
+          this._hlModal.close();
+        } catch (e) {
+        }
+        this._hlModal = null;
+      }
+    };
+    session.meta = meta;
+    session.onMeta = onMeta;
+    meta.observe(onMeta);
+    onMeta();
   }
   endSession() {
     const s = this.session;
@@ -11625,6 +11653,19 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     try {
       if (s.onSync) s.provider.off("sync", s.onSync);
     } catch (e) {
+    }
+    try {
+      if (s.onMeta && s.meta) s.meta.unobserve(s.onMeta);
+    } catch (e) {
+    }
+    if (this._harnessLock) this._harnessLock = false;
+    if (this._hlModal) {
+      try {
+        this._hlModal.allowClose = true;
+        this._hlModal.close();
+      } catch (e) {
+      }
+      this._hlModal = null;
     }
     try {
       s.provider.destroy();
@@ -11849,6 +11890,34 @@ var SyncGateModal = class extends import_obsidian.Modal {
   onClose() {
     try {
       document.body.classList.remove("collab-syncgate-open");
+    } catch (e) {
+    }
+    this.contentEl.empty();
+  }
+};
+var HarnessLockModal = class extends import_obsidian.Modal {
+  // 하네스가 이 노트를 갱신하는 동안 뜬다(닫기 불가). 하네스가 끝내면 자동으로 닫힌다.
+  constructor(app) {
+    super(app);
+    this.allowClose = false;
+  }
+  onOpen() {
+    const { contentEl, containerEl } = this;
+    document.body.classList.add("collab-harnesslock-open");
+    try {
+      containerEl.querySelectorAll(".modal-close-button").forEach((x) => x.remove());
+    } catch (e) {
+    }
+    contentEl.createEl("h3", { text: "\u{1F916} \uD558\uB124\uC2A4\uAC00 \uC815\uB9AC\uD558\uB294 \uC911" });
+    contentEl.createEl("p", { text: "\uC774 \uB178\uD2B8\uB97C \uD558\uB124\uC2A4\uAC00 \uAC31\uC2E0\uD558\uB294 \uB3D9\uC548 \uC7A0\uC2DC \uD3B8\uC9D1\uC774 \uC7A0\uAE41\uB2C8\uB2E4. \uACE7 \uC790\uB3D9\uC73C\uB85C \uC5F4\uB9BD\uB2C8\uB2E4. (\uB2E4\uB978 \uB178\uD2B8\uB294 \uADF8\uB300\uB85C \uD3B8\uC9D1\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.)" });
+  }
+  close() {
+    if (this.allowClose) super.close();
+  }
+  // 하네스가 잠금을 풀 때만 닫힘
+  onClose() {
+    try {
+      document.body.classList.remove("collab-harnesslock-open");
     } catch (e) {
     }
     this.contentEl.empty();

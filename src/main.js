@@ -72,7 +72,7 @@ const COLLAB_CSS = `
   box-shadow: 0 1px 4px rgba(0,0,0,.28) !important; transition: opacity .15s ease !important; pointer-events: none !important;
 }
 .cm-ySelection { border-radius: 2px; }
-body.collab-syncgate-open .modal-close-button { display: none !important; }
+body.collab-syncgate-open .modal-close-button, body.collab-harnesslock-open .modal-close-button { display: none !important; }
 `;
 
 export default class VaultSyncCollab extends Plugin {
@@ -509,7 +509,7 @@ export default class VaultSyncCollab extends Plugin {
     } catch (e) {}
   }
   refreshLock() {
-    const lock = this.settings.enabled && (this.isOffline() || this._gating || this._collabConnecting || this._outdated || this._dupName);   // 오프라인·초기동기화·협업연결중·구버전·기기이름중복이면 편집 잠금
+    const lock = this.settings.enabled && (this.isOffline() || this._gating || this._collabConnecting || this._outdated || this._dupName || this._harnessLock);   // 오프라인·초기동기화·협업연결중·구버전·기기이름중복·하네스정리중이면 편집 잠금
     // 모바일: CM readOnly 가 iOS 웹뷰에선 입력을 못 막는다. 그래서 노트를 «읽기 모드」로 강제 전환한다
     //  → 읽기 모드는 편집기가 아니라 렌더링 뷰라 어떤 플랫폼에서도 편집이 불가능하다. (cm 핸들 불필요)
     if (Platform.isMobile) this.applyViewLock(lock);
@@ -519,7 +519,7 @@ export default class VaultSyncCollab extends Plugin {
       let cur; try { cur = !!cm.state.readOnly; } catch (e) { cur = undefined; }
       if (cur !== lock) { try { cm.dispatch({ effects: this.editLock.reconfigure(lock ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []) }); } catch (e) {} }
     }
-    if (lock) this.setCollab(this._dupName ? ('🔴 기기 이름 «' + this.settings.deviceLabel + '» 중복 — 이름 바꿔야 편집·동기화') : this._outdated ? ('🔺 업데이트 필요 → ' + (this._latestVer || '') + ' · 편집잠금') : (this._collabConnecting && !this.isOffline() && !this._gating) ? '🔄 노트 동기화 중… 편집 잠금' : '🔒 오프라인·편집잠금');
+    if (lock) this.setCollab(this._dupName ? ('🔴 기기 이름 «' + this.settings.deviceLabel + '» 중복 — 이름 바꿔야 편집·동기화') : this._outdated ? ('🔺 업데이트 필요 → ' + (this._latestVer || '') + ' · 편집잠금') : this._harnessLock ? '🤖 하네스가 정리하는 중… 잠시 편집 잠금' : (this._collabConnecting && !this.isOffline() && !this._gating) ? '🔄 노트 동기화 중… 편집 잠금' : '🔒 오프라인·편집잠금');
     else if (this._lastLock) this.setCollab((this.session && this.session.provider && this.session.provider.wsconnected) ? '연결됨·' + this.peerCount() : '연결 안됨');
     this._lastLock = lock;
   }
@@ -543,7 +543,7 @@ export default class VaultSyncCollab extends Plugin {
     if (this.presence || !this.settings.enabled || !this.settings.wsUrl) return;
     const token = await this.getToken(); if (!token) return;
     this._presenceDoc = new Y.Doc();
-    this.presence = new WebsocketProvider(this.settings.wsUrl, '__presence__', this._presenceDoc, { params: { token } });
+    this.presence = new WebsocketProvider(this.settings.wsUrl, '__presence__', this._presenceDoc, { params: { token, v: this.manifest.version } });   // v: relay 가 옛 플러그인 차단(강제 업데이트)
     this.presence.awareness.setLocalStateField('user', { name: `${this.settings.username}·${this.settings.deviceLabel}`, color: this.userColor, login: this.settings.username, device: this.settings.deviceLabel, deviceId: this.settings.deviceId });
     this.updatePresencePath();
     this.presence.awareness.on('change', () => this.onPresenceChange());
@@ -674,8 +674,9 @@ export default class VaultSyncCollab extends Plugin {
     const token = await this.getToken(); if (!token) { this.setCollab('로그인 필요'); this._collabConnecting = false; try { clearTimeout(this._connectTimer); } catch (e) {} this.refreshLock(); return; }
     const path = file.path; const ydoc = new Y.Doc();
     const room = 'note:' + b64url(path.normalize('NFC'));
-    const provider = new WebsocketProvider(this.settings.wsUrl, room, ydoc, { params: { token } });
+    const provider = new WebsocketProvider(this.settings.wsUrl, room, ydoc, { params: { token, v: this.manifest.version } });   // v: relay 가 옛 플러그인 차단(강제 업데이트)
     const ytext = ydoc.getText('content');
+    const meta = ydoc.getMap('meta');   // 하네스가 이 노트를 쓰는 동안 meta.lock 을 건다(플러그인은 lock 을 안 건다) → 관찰해서 편집잠금
     const label = `${this.settings.username}·${this.settings.deviceLabel}`;
     provider.awareness.setLocalStateField('user', { name: label, color: this.userColor, colorLight: this.userColor + '40', login: this.settings.username });
     const session = { path, ydoc, provider, ytext, cm, attached: false, saveTimer: null, onSync: null, persist: null };
@@ -696,6 +697,15 @@ export default class VaultSyncCollab extends Plugin {
       setTimeout(() => this.followScroll(session), 400);   // 따라가는 중이면 그 사람 커서로 스크롤
     };
     session.onSync = onSync; provider.on('sync', onSync);
+    const onMeta = () => {   // 하네스가 이 노트를 잠갔나 → 모달+편집잠금 (플러그인은 lock 을 안 걸므로 lock 존재 = 하네스가 씀)
+      if (this.session !== session) return;
+      const locked = !!meta.get('lock');
+      if (locked === !!this._harnessLock) return;
+      this._harnessLock = locked; this.refreshLock();
+      if (locked) { if (!this._hlModal) { try { this._hlModal = new HarnessLockModal(this.app); this._hlModal.open(); } catch (e) {} } }
+      else if (this._hlModal) { try { this._hlModal.allowClose = true; this._hlModal.close(); } catch (e) {} this._hlModal = null; }
+    };
+    session.meta = meta; session.onMeta = onMeta; meta.observe(onMeta); onMeta();
   }
   endSession() {
     const s = this.session; if (!s) return; this.session = null; this.collabPath = null;
@@ -704,6 +714,9 @@ export default class VaultSyncCollab extends Plugin {
     try { clearTimeout(s.saveTimer); } catch (e) {}
     try { if (s.persist) s.ytext.unobserve(s.persist); } catch (e) {}
     try { if (s.onSync) s.provider.off('sync', s.onSync); } catch (e) {}
+    try { if (s.onMeta && s.meta) s.meta.unobserve(s.onMeta); } catch (e) {}
+    if (this._harnessLock) this._harnessLock = false;   // 노트를 떠나면 하네스잠금 상태도 내린다(잠긴 건 그 노트일 뿐)
+    if (this._hlModal) { try { this._hlModal.allowClose = true; this._hlModal.close(); } catch (e) {} this._hlModal = null; }
     try { s.provider.destroy(); } catch (e) {}
     try { s.ydoc.destroy(); } catch (e) {}
     this.setCollab('연결 안됨'); this.refreshLock();
@@ -820,6 +833,18 @@ class SyncGateModal extends Modal {
   }
   close() { if (this.allowClose) super.close(); }   // 완료 전엔 Esc·배경클릭·X 로 안 닫힘
   onClose() { try { document.body.classList.remove('collab-syncgate-open'); } catch (e) {} this.contentEl.empty(); }
+}
+class HarnessLockModal extends Modal {   // 하네스가 이 노트를 갱신하는 동안 뜬다(닫기 불가). 하네스가 끝내면 자동으로 닫힌다.
+  constructor(app) { super(app); this.allowClose = false; }
+  onOpen() {
+    const { contentEl, containerEl } = this;
+    document.body.classList.add('collab-harnesslock-open');
+    try { containerEl.querySelectorAll('.modal-close-button').forEach((x) => x.remove()); } catch (e) {}
+    contentEl.createEl('h3', { text: '🤖 하네스가 정리하는 중' });
+    contentEl.createEl('p', { text: '이 노트를 하네스가 갱신하는 동안 잠시 편집이 잠깁니다. 곧 자동으로 열립니다. (다른 노트는 그대로 편집할 수 있습니다.)' });
+  }
+  close() { if (this.allowClose) super.close(); }   // 하네스가 잠금을 풀 때만 닫힘
+  onClose() { try { document.body.classList.remove('collab-harnesslock-open'); } catch (e) {} this.contentEl.empty(); }
 }
 class AlertModal extends Modal {
   constructor(app, title, body) { super(app); this.t = title; this.b = body; }
