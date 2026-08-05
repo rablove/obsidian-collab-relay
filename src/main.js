@@ -106,6 +106,16 @@ export default class VaultSyncCollab extends Plugin {
   configured() { return this.settings.enabled && this.settings.couchUrl && this.settings.dbName && this.settings.username; }
   isMd(f) { return f && f.extension === 'md'; }
   _ignored(p) { return /(^|\/)\./.test(String(p || '')); }   // .trash/·.obsidian/ 등 숨김폴더 경로는 동기화 제외 — 삭제본이 되살아나거나 cvs:.trash/… 엉뚱한 문서 생기는 것 방지
+  // 두 내용 중 하나가 다른 하나를 «온전히 포함»(가운데 삽입만 차이)하면 그 상위집합을 알려준다. 진짜 분기면 null → 사본 유지.
+  _relate(a, b) {
+    if (a === b) return 'equal';
+    let p = 0; const mn = Math.min(a.length, b.length);
+    while (p < mn && a[p] === b[p]) p++;
+    let s = 0; while (s < mn - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+    if (a.slice(p, a.length - s) === '') return 'b';   // a ⊂ b (b 가 상위집합)
+    if (b.slice(p, b.length - s) === '') return 'a';   // b ⊂ a (a 가 상위집합)
+    return null;
+  }
 
   /* ============ 파일 동기화 (CouchDB) ============ */
   async req(method, path, body) {
@@ -164,9 +174,13 @@ export default class VaultSyncCollab extends Plugin {
       const server = (cur.status === 200 && cur.json) ? cur.json : null;
       const base = this.shadow.get(pNfc);
       if (server && !server.deleted && server.content !== undefined && server.content !== content && base !== undefined && server.content !== base) {
-        await this.logConflict(pNfc, 'upsert', base, content, server.content, mtime, server.mtime || 0, server.lastEditor);
-        if (mtime >= (server.mtime || 0)) { await this.saveConflictCopy(pNfc, server.content, server.mtime || Date.now(), 'server'); }
-        else { await this.saveConflictCopy(pNfc, content, mtime, this.settings.deviceId || 'local'); await this.writeLocal(pNfc, server.content); this.shadow.set(pNfc, server.content); return; }
+        const rel = this._relate(content, server.content);   // 사소한 포함관계면 사본 없이 상위집합 채택
+        if (rel === 'b') { await this.writeLocal(pNfc, server.content); this.shadow.set(pNfc, server.content); return; }   // 서버가 상위집합 → 서버본
+        if (rel !== 'a') {   // 'a'(local 상위집합)면 아래 putDoc 로 올림. 그 외 진짜 분기만 사본.
+          await this.logConflict(pNfc, 'upsert', base, content, server.content, mtime, server.mtime || 0, server.lastEditor);
+          if (mtime >= (server.mtime || 0)) { await this.saveConflictCopy(pNfc, server.content, server.mtime || Date.now(), 'server'); }
+          else { await this.saveConflictCopy(pNfc, content, mtime, this.settings.deviceId || 'local'); await this.writeLocal(pNfc, server.content); this.shadow.set(pNfc, server.content); return; }
+        }
       }
       await this.putDoc(pNfc, content, mtime);
     } catch (e) { console.error('[sync] upsert', e); }
@@ -298,6 +312,9 @@ export default class VaultSyncCollab extends Plugin {
       if (local === base) { await this.writeLocal(p, R); this.shadow.set(p, R); return true; }  // 서버만 바뀜 → 서버로
       // 기준선 대비 양쪽 다 바뀜 → 진짜 동시편집 충돌 → 사본 보관
       const st = await this.app.vault.adapter.stat(p); const lm = st ? st.mtime : 0;
+      const rel = this._relate(local, R);   // 사소한 포함관계면 사본 없이 상위집합 채택(고유 내용 없으니 손실 없음)
+      if (rel === 'equal' || rel === 'b') { await this.writeLocal(p, R); this.shadow.set(p, R); return true; }   // R 이 상위집합 → 서버본
+      if (rel === 'a') { await this.putDoc(p, local, lm); this.shadow.set(p, local); return true; }               // local 이 상위집합 → 올림
       await this.logConflict(p, 'applyRemote', base, local, R, lm, doc.mtime || 0, doc.lastEditor);
       if ((doc.mtime || 0) >= lm) { await this.saveConflictCopy(p, local, lm, this.settings.deviceId || 'local'); await this.writeLocal(p, R); this.shadow.set(p, R); }
       else { await this.saveConflictCopy(p, R, doc.mtime || 0, 'server'); await this.putDoc(p, local, lm); }

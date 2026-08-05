@@ -10488,6 +10488,18 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     return /(^|\/)\./.test(String(p || ""));
   }
   // .trash/·.obsidian/ 등 숨김폴더 경로는 동기화 제외 — 삭제본이 되살아나거나 cvs:.trash/… 엉뚱한 문서 생기는 것 방지
+  // 두 내용 중 하나가 다른 하나를 «온전히 포함»(가운데 삽입만 차이)하면 그 상위집합을 알려준다. 진짜 분기면 null → 사본 유지.
+  _relate(a, b) {
+    if (a === b) return "equal";
+    let p = 0;
+    const mn = Math.min(a.length, b.length);
+    while (p < mn && a[p] === b[p]) p++;
+    let s = 0;
+    while (s < mn - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+    if (a.slice(p, a.length - s) === "") return "b";
+    if (b.slice(p, b.length - s) === "") return "a";
+    return null;
+  }
   /* ============ 파일 동기화 (CouchDB) ============ */
   async req(method, path, body) {
     const base = (this.settings.couchUrl || "").replace(/\/$/, "");
@@ -10560,14 +10572,22 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       const server = cur.status === 200 && cur.json ? cur.json : null;
       const base = this.shadow.get(pNfc);
       if (server && !server.deleted && server.content !== void 0 && server.content !== content && base !== void 0 && server.content !== base) {
-        await this.logConflict(pNfc, "upsert", base, content, server.content, mtime, server.mtime || 0, server.lastEditor);
-        if (mtime >= (server.mtime || 0)) {
-          await this.saveConflictCopy(pNfc, server.content, server.mtime || Date.now(), "server");
-        } else {
-          await this.saveConflictCopy(pNfc, content, mtime, this.settings.deviceId || "local");
+        const rel = this._relate(content, server.content);
+        if (rel === "b") {
           await this.writeLocal(pNfc, server.content);
           this.shadow.set(pNfc, server.content);
           return;
+        }
+        if (rel !== "a") {
+          await this.logConflict(pNfc, "upsert", base, content, server.content, mtime, server.mtime || 0, server.lastEditor);
+          if (mtime >= (server.mtime || 0)) {
+            await this.saveConflictCopy(pNfc, server.content, server.mtime || Date.now(), "server");
+          } else {
+            await this.saveConflictCopy(pNfc, content, mtime, this.settings.deviceId || "local");
+            await this.writeLocal(pNfc, server.content);
+            this.shadow.set(pNfc, server.content);
+            return;
+          }
         }
       }
       await this.putDoc(pNfc, content, mtime);
@@ -10817,6 +10837,17 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       }
       const st = await this.app.vault.adapter.stat(p);
       const lm = st ? st.mtime : 0;
+      const rel = this._relate(local, R);
+      if (rel === "equal" || rel === "b") {
+        await this.writeLocal(p, R);
+        this.shadow.set(p, R);
+        return true;
+      }
+      if (rel === "a") {
+        await this.putDoc(p, local, lm);
+        this.shadow.set(p, local);
+        return true;
+      }
       await this.logConflict(p, "applyRemote", base, local, R, lm, doc2.mtime || 0, doc2.lastEditor);
       if ((doc2.mtime || 0) >= lm) {
         await this.saveConflictCopy(p, local, lm, this.settings.deviceId || "local");
