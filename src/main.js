@@ -128,7 +128,7 @@ export default class VaultSyncCollab extends Plugin {
       this.onActiveChange(); this.ensurePresence();
     });
   }
-  onunload() { this._rtRunning = false; try { this.applyViewLock(false); } catch (e) {} try { if (this._collabStyle) this._collabStyle.remove(); } catch (e) {} this.endSession(); this.stopPresence(); }
+  onunload() { this._rtRunning = false; try { this.applyViewLock(false); } catch (e) {} try { if (this._discModal) { this._discModal._auto = true; this._discModal.close(); } } catch (e) {} try { if (this._collabStyle) this._collabStyle.remove(); } catch (e) {} this.endSession(); this.stopPresence(); }
 
   setSync(s) { if (this.syncEl) this.syncEl.setText('⇄ ' + s); }
   setCollab(s) { if (this.collabEl) this.collabEl.setText('👥 ' + s); }
@@ -522,6 +522,22 @@ export default class VaultSyncCollab extends Plugin {
     if (lock) this.setCollab(this._dupName ? ('🔴 기기 이름 «' + this.settings.deviceLabel + '» 중복 — 이름 바꿔야 편집·동기화') : this._outdated ? ('🔺 업데이트 필요 → ' + (this._latestVer || '') + ' · 편집잠금') : this._harnessLock ? '🤖 하네스가 정리하는 중… 잠시 편집 잠금' : (this._collabConnecting && !this.isOffline() && !this._gating) ? '🔄 노트 동기화 중… 편집 잠금' : '🔒 오프라인·편집잠금');
     else if (this._lastLock) this.setCollab((this.session && this.session.provider && this.session.provider.wsconnected) ? '연결됨·' + this.peerCount() : '연결 안됨');
     this._lastLock = lock;
+    this.updateDisconnectModal();
+  }
+  // 연결 안됨(오프라인/서버 도달 불가)일 때 «닫을 수 있는» 모달로 시각 표시. 편집 잠금 자체는 refreshLock 이 함(이 모달은 표시용).
+  //  _outdated 는 UpdateModal(«BRAT 업데이트»)이 따로 담당, _gating/_harnessLock/_dupName 도 각자 모달이 있어 여기선 제외.
+  updateDisconnectModal() {
+    const off = this.settings.enabled && this.isOffline() && !this._gating && !this._harnessLock && !this._dupName && !this._outdated;
+    if (off) {
+      if (!this._discDismissed && !this._discModal) {
+        const m = new DisconnectModal(this.app);
+        m.onDismiss = () => { this._discModal = null; this._discDismissed = true; };   // 사용자가 닫음 → 재연결 전까지 다시 안 띄움
+        this._discModal = m; m.open();
+      }
+    } else {
+      this._discDismissed = false;
+      if (this._discModal) { const m = this._discModal; this._discModal = null; m._auto = true; try { m.close(); } catch (e) {} }   // 복구 → 자동 닫힘(사용자닫음으로 표시 안 함)
+    }
   }
   // 열린 마크다운 노트를 읽기 모드(preview)로 강제/복구. 원래 모드는 기억해뒀다가 온라인 되면 되돌린다.
   applyViewLock(lock) {
@@ -845,6 +861,19 @@ class HarnessLockModal extends Modal {   // 하네스가 이 노트를 갱신하
   }
   close() { if (this.allowClose) super.close(); }   // 하네스가 잠금을 풀 때만 닫힘
   onClose() { try { document.body.classList.remove('collab-harnesslock-open'); } catch (e) {} this.contentEl.empty(); }
+}
+class DisconnectModal extends Modal {   // 연결 안됨 시각 표시(닫기 가능). 편집 잠금은 refreshLock 이 유지.
+  constructor(app) { super(app); this.onDismiss = null; this._auto = false; }
+  onOpen() {
+    const { contentEl } = this; contentEl.empty();
+    contentEl.createEl('h3', { text: '🔌 연결 안됨' });
+    contentEl.createEl('p', { text: '서버에 연결되어 있지 않습니다. 인터넷 연결을 확인하세요. 연결이 복구되면 편집이 자동으로 다시 열립니다.' });
+    const hint = contentEl.createEl('p', { text: '· 편집은 잠깁니다(연결된 뒤 편집한 것이 덮이는 것을 막기 위해서).\n· 계속 안 되면 플러그인 업데이트가 필요할 수 있습니다 — BRAT 로 확인하세요.' });
+    hint.style.cssText = 'color:var(--text-muted);font-size:.9em;white-space:pre-line;';
+    const row = contentEl.createDiv(); row.style.cssText = 'display:flex;justify-content:flex-end;margin-top:10px';
+    const ok = row.createEl('button', { text: '닫기' }); ok.classList.add('mod-cta'); ok.onclick = () => this.close();
+  }
+  onClose() { if (!this._auto && this.onDismiss) { try { this.onDismiss(); } catch (e) {} } this.contentEl.empty(); }
 }
 class AlertModal extends Modal {
   constructor(app, title, body) { super(app); this.t = title; this.b = body; }

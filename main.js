@@ -10547,6 +10547,13 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     } catch (e) {
     }
     try {
+      if (this._discModal) {
+        this._discModal._auto = true;
+        this._discModal.close();
+      }
+    } catch (e) {
+    }
+    try {
       if (this._collabStyle) this._collabStyle.remove();
     } catch (e) {
     }
@@ -11277,6 +11284,34 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     if (lock) this.setCollab(this._dupName ? "\u{1F534} \uAE30\uAE30 \uC774\uB984 \xAB" + this.settings.deviceLabel + "\xBB \uC911\uBCF5 \u2014 \uC774\uB984 \uBC14\uAFD4\uC57C \uD3B8\uC9D1\xB7\uB3D9\uAE30\uD654" : this._outdated ? "\u{1F53A} \uC5C5\uB370\uC774\uD2B8 \uD544\uC694 \u2192 " + (this._latestVer || "") + " \xB7 \uD3B8\uC9D1\uC7A0\uAE08" : this._harnessLock ? "\u{1F916} \uD558\uB124\uC2A4\uAC00 \uC815\uB9AC\uD558\uB294 \uC911\u2026 \uC7A0\uC2DC \uD3B8\uC9D1 \uC7A0\uAE08" : this._collabConnecting && !this.isOffline() && !this._gating ? "\u{1F504} \uB178\uD2B8 \uB3D9\uAE30\uD654 \uC911\u2026 \uD3B8\uC9D1 \uC7A0\uAE08" : "\u{1F512} \uC624\uD504\uB77C\uC778\xB7\uD3B8\uC9D1\uC7A0\uAE08");
     else if (this._lastLock) this.setCollab(this.session && this.session.provider && this.session.provider.wsconnected ? "\uC5F0\uACB0\uB428\xB7" + this.peerCount() : "\uC5F0\uACB0 \uC548\uB428");
     this._lastLock = lock;
+    this.updateDisconnectModal();
+  }
+  // 연결 안됨(오프라인/서버 도달 불가)일 때 «닫을 수 있는» 모달로 시각 표시. 편집 잠금 자체는 refreshLock 이 함(이 모달은 표시용).
+  //  _outdated 는 UpdateModal(«BRAT 업데이트»)이 따로 담당, _gating/_harnessLock/_dupName 도 각자 모달이 있어 여기선 제외.
+  updateDisconnectModal() {
+    const off = this.settings.enabled && this.isOffline() && !this._gating && !this._harnessLock && !this._dupName && !this._outdated;
+    if (off) {
+      if (!this._discDismissed && !this._discModal) {
+        const m = new DisconnectModal(this.app);
+        m.onDismiss = () => {
+          this._discModal = null;
+          this._discDismissed = true;
+        };
+        this._discModal = m;
+        m.open();
+      }
+    } else {
+      this._discDismissed = false;
+      if (this._discModal) {
+        const m = this._discModal;
+        this._discModal = null;
+        m._auto = true;
+        try {
+          m.close();
+        } catch (e) {
+        }
+      }
+    }
   }
   // 열린 마크다운 노트를 읽기 모드(preview)로 강제/복구. 원래 모드는 기억해뒀다가 온라인 되면 되돌린다.
   applyViewLock(lock) {
@@ -11919,6 +11954,36 @@ var HarnessLockModal = class extends import_obsidian.Modal {
     try {
       document.body.classList.remove("collab-harnesslock-open");
     } catch (e) {
+    }
+    this.contentEl.empty();
+  }
+};
+var DisconnectModal = class extends import_obsidian.Modal {
+  // 연결 안됨 시각 표시(닫기 가능). 편집 잠금은 refreshLock 이 유지.
+  constructor(app) {
+    super(app);
+    this.onDismiss = null;
+    this._auto = false;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: "\u{1F50C} \uC5F0\uACB0 \uC548\uB428" });
+    contentEl.createEl("p", { text: "\uC11C\uBC84\uC5D0 \uC5F0\uACB0\uB418\uC5B4 \uC788\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uC778\uD130\uB137 \uC5F0\uACB0\uC744 \uD655\uC778\uD558\uC138\uC694. \uC5F0\uACB0\uC774 \uBCF5\uAD6C\uB418\uBA74 \uD3B8\uC9D1\uC774 \uC790\uB3D9\uC73C\uB85C \uB2E4\uC2DC \uC5F4\uB9BD\uB2C8\uB2E4." });
+    const hint = contentEl.createEl("p", { text: "\xB7 \uD3B8\uC9D1\uC740 \uC7A0\uAE41\uB2C8\uB2E4(\uC5F0\uACB0\uB41C \uB4A4 \uD3B8\uC9D1\uD55C \uAC83\uC774 \uB36E\uC774\uB294 \uAC83\uC744 \uB9C9\uAE30 \uC704\uD574\uC11C).\n\xB7 \uACC4\uC18D \uC548 \uB418\uBA74 \uD50C\uB7EC\uADF8\uC778 \uC5C5\uB370\uC774\uD2B8\uAC00 \uD544\uC694\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4 \u2014 BRAT \uB85C \uD655\uC778\uD558\uC138\uC694." });
+    hint.style.cssText = "color:var(--text-muted);font-size:.9em;white-space:pre-line;";
+    const row = contentEl.createDiv();
+    row.style.cssText = "display:flex;justify-content:flex-end;margin-top:10px";
+    const ok = row.createEl("button", { text: "\uB2EB\uAE30" });
+    ok.classList.add("mod-cta");
+    ok.onclick = () => this.close();
+  }
+  onClose() {
+    if (!this._auto && this.onDismiss) {
+      try {
+        this.onDismiss();
+      } catch (e) {
+      }
     }
     this.contentEl.empty();
   }
