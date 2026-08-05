@@ -131,7 +131,7 @@ export default class VaultSyncCollab extends Plugin {
   }
 
   async onLocal(file) {
-    if (this.applying || !this.configured() || !this.isMd(file) || this._ignored(file.path)) return;
+    if (this.applying || Date.now() < (this._suppressUntil || 0) || !this.configured() || !this.isMd(file) || this._ignored(file.path)) return;
     const p = nfc(file.path);
     if (p === this.collabPath) return;   // 협업 중인 노트는 relay 가 처리 (겹침 방지)
     let content; try { content = await this.app.vault.adapter.read(file.path); } catch (e) { return; }
@@ -139,12 +139,12 @@ export default class VaultSyncCollab extends Plugin {
     await this.upsert(p, content, (file.stat && file.stat.mtime) || Date.now());
   }
   async onLocalDelete(rawPath) {
-    if (this.applying || !this.configured() || !rawPath.endsWith('.md') || this._ignored(rawPath)) return;
+    if (this.applying || Date.now() < (this._suppressUntil || 0) || !this.configured() || !rawPath.endsWith('.md') || this._ignored(rawPath)) return;
     const p = nfc(rawPath); if (p === this.collabPath) return;
     this.shadow.delete(p); await this.markDeleted(p);
   }
   async onLocalRename(file, oldPath) {
-    if (this.applying || !this.configured()) return;
+    if (this.applying || Date.now() < (this._suppressUntil || 0) || !this.configured()) return;
     if (oldPath.endsWith('.md') && !this._ignored(oldPath)) await this.markDeleted(nfc(oldPath));
     if (this.isMd(file)) await this.onLocal(file);   // onLocal 이 .trash 경로는 알아서 무시
   }
@@ -379,7 +379,7 @@ export default class VaultSyncCollab extends Plugin {
         if (!p.endsWith('.md')) continue;
         try { await this.ensureParent(p); await this.app.vault.adapter.write(p, d.content || ''); this.shadow.set(p, d.content || ''); wr++; } catch (e) {}
       }
-    } finally { this.applying = false; }
+    } finally { this.applying = false; this._suppressUntil = Date.now() + 12000; }   // 리셋 후 12초간 로컬→서버 전파 차단(뒤늦게 뜨는 delete 이벤트가 서버 대량삭제로 번지는 것 방지)
     try { const info = await this.req('GET', encodeURIComponent(this.settings.dbName)); if (info.status === 200 && info.json && info.json.update_seq !== undefined) { this.settings.lastSeq = info.json.update_seq; await this.saveSettings(); } } catch (e) {}
     new Notice(`♻️ 다시 받기 완료 — 로컬 ${del}개 삭제 · 서버본 ${wr}개 기록`);
   }

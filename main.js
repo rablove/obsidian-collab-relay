@@ -10518,7 +10518,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
   }
   async onLocal(file) {
-    if (this.applying || !this.configured() || !this.isMd(file) || this._ignored(file.path)) return;
+    if (this.applying || Date.now() < (this._suppressUntil || 0) || !this.configured() || !this.isMd(file) || this._ignored(file.path)) return;
     const p = nfc(file.path);
     if (p === this.collabPath) return;
     let content;
@@ -10531,14 +10531,14 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     await this.upsert(p, content, file.stat && file.stat.mtime || Date.now());
   }
   async onLocalDelete(rawPath) {
-    if (this.applying || !this.configured() || !rawPath.endsWith(".md") || this._ignored(rawPath)) return;
+    if (this.applying || Date.now() < (this._suppressUntil || 0) || !this.configured() || !rawPath.endsWith(".md") || this._ignored(rawPath)) return;
     const p = nfc(rawPath);
     if (p === this.collabPath) return;
     this.shadow.delete(p);
     await this.markDeleted(p);
   }
   async onLocalRename(file, oldPath) {
-    if (this.applying || !this.configured()) return;
+    if (this.applying || Date.now() < (this._suppressUntil || 0) || !this.configured()) return;
     if (oldPath.endsWith(".md") && !this._ignored(oldPath)) await this.markDeleted(nfc(oldPath));
     if (this.isMd(file)) await this.onLocal(file);
   }
@@ -11010,6 +11010,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       }
     } finally {
       this.applying = false;
+      this._suppressUntil = Date.now() + 12e3;
     }
     try {
       const info = await this.req("GET", encodeURIComponent(this.settings.dbName));
