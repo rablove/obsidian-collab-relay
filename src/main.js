@@ -170,7 +170,7 @@ export default class VaultSyncCollab extends Plugin {
   }
 
   async onLocal(file) {
-    if (this.applying || Date.now() < (this._suppressUntil || 0) || !this.configured() || !this.isMd(file) || this._ignored(file.path)) return;
+    if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured() || !this.isMd(file) || this._ignored(file.path)) return;
     const p = nfc(file.path);
     if (p === this.collabPath) return;   // 협업 중인 노트는 relay 가 처리 (겹침 방지)
     let content; try { content = await this.app.vault.adapter.read(file.path); } catch (e) { return; }
@@ -178,12 +178,12 @@ export default class VaultSyncCollab extends Plugin {
     await this.upsert(p, content, (file.stat && file.stat.mtime) || Date.now());
   }
   async onLocalDelete(rawPath) {
-    if (this.applying || Date.now() < (this._suppressUntil || 0) || !this.configured() || !rawPath.endsWith('.md') || this._ignored(rawPath)) return;
+    if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured() || !rawPath.endsWith('.md') || this._ignored(rawPath)) return;
     const p = nfc(rawPath); if (p === this.collabPath) return;
     this.shadow.delete(p); await this.markDeleted(p);
   }
   async onLocalRename(file, oldPath) {
-    if (this.applying || Date.now() < (this._suppressUntil || 0) || !this.configured()) return;
+    if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured()) return;
     if (oldPath.endsWith('.md') && !this._ignored(oldPath)) await this.markDeleted(nfc(oldPath));
     if (this.isMd(file)) await this.onLocal(file);   // onLocal 이 .trash 경로는 알아서 무시
   }
@@ -509,7 +509,7 @@ export default class VaultSyncCollab extends Plugin {
     } catch (e) {}
   }
   refreshLock() {
-    const lock = this.settings.enabled && (this.isOffline() || this._gating || this._collabConnecting || this._outdated);   // 오프라인·초기동기화·협업연결중·구버전이면 편집 잠금
+    const lock = this.settings.enabled && (this.isOffline() || this._gating || this._collabConnecting || this._outdated || this._dupName);   // 오프라인·초기동기화·협업연결중·구버전·기기이름중복이면 편집 잠금
     // 모바일: CM readOnly 가 iOS 웹뷰에선 입력을 못 막는다. 그래서 노트를 «읽기 모드」로 강제 전환한다
     //  → 읽기 모드는 편집기가 아니라 렌더링 뷰라 어떤 플랫폼에서도 편집이 불가능하다. (cm 핸들 불필요)
     if (Platform.isMobile) this.applyViewLock(lock);
@@ -519,7 +519,7 @@ export default class VaultSyncCollab extends Plugin {
       let cur; try { cur = !!cm.state.readOnly; } catch (e) { cur = undefined; }
       if (cur !== lock) { try { cm.dispatch({ effects: this.editLock.reconfigure(lock ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []) }); } catch (e) {} }
     }
-    if (lock) this.setCollab(this._outdated ? ('🔺 업데이트 필요 → ' + (this._latestVer || '') + ' · 편집잠금') : (this._collabConnecting && !this.isOffline() && !this._gating) ? '🔄 노트 동기화 중… 편집 잠금' : '🔒 오프라인·편집잠금');
+    if (lock) this.setCollab(this._dupName ? ('🔴 기기 이름 «' + this.settings.deviceLabel + '» 중복 — 이름 바꿔야 편집·동기화') : this._outdated ? ('🔺 업데이트 필요 → ' + (this._latestVer || '') + ' · 편집잠금') : (this._collabConnecting && !this.isOffline() && !this._gating) ? '🔄 노트 동기화 중… 편집 잠금' : '🔒 오프라인·편집잠금');
     else if (this._lastLock) this.setCollab((this.session && this.session.provider && this.session.provider.wsconnected) ? '연결됨·' + this.peerCount() : '연결 안됨');
     this._lastLock = lock;
   }
@@ -579,8 +579,26 @@ export default class VaultSyncCollab extends Plugin {
   onPresenceChange() {
     // 따라가는 사람이 노트를 바꾸면 나도 따라간다.
     if (this.following) this.jumpToFollowed();
+    this.checkDupName();   // 기기 이름 충돌 감지 → 충돌이면 편집·동기화·협업 잠금
     // presence 가 바뀌면 «연결됨·N» 을 즉시 갱신 (목록과 실시간 일치)
-    if (!this._lastLock) this.setCollab((this.presence && this.presence.wsconnected) ? '연결됨·' + this.peerCount() : '연결 안됨');
+    if (!this._lastLock && !this._dupName) this.setCollab((this.presence && this.presence.wsconnected) ? '연결됨·' + this.peerCount() : '연결 안됨');
+  }
+  checkDupName() {   // 같은 계정·같은 기기이름·다른 deviceId 가 접속해 있으면 «이름 중복» → deviceId 큰 쪽이 잠근다(결정적으로 한 대만)
+    try {
+      if (!this.presence) return;
+      let dup = false;
+      for (const st of this.presence.awareness.getStates().values()) {
+        const u = st && st.user; if (!u || !u.deviceId) continue;
+        if ((u.login || '') === this.settings.username && (u.device || '') === this.settings.deviceLabel
+            && u.deviceId !== this.settings.deviceId && String(this.settings.deviceId || '') > String(u.deviceId)) dup = true;
+      }
+      if (dup !== this._dupName) {
+        this._dupName = dup;
+        if (dup) { try { this.endSession(); } catch (e) {} if (!this._dupShown) { this._dupShown = true; try { new DupNameModal(this.app, this.settings.deviceLabel).open(); } catch (e) {} } }
+        else this._dupShown = false;
+        this.refreshLock();
+      }
+    } catch (e) {}
   }
   followScroll(session) {
     // 같은 노트 안에서 따라가는 사람의 커서 위치로 화면을 스크롤한다.
@@ -635,6 +653,7 @@ export default class VaultSyncCollab extends Plugin {
 
   async onActiveChange() {
     if (!this.settings.enabled) return;
+    if (this._dupName) { this.endSession(); this._startingPath = null; this.refreshLock(); return; }   // 이름 충돌 중엔 협업 세션 안 붙음(잠금 유지)
     this.updatePresencePath();
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
     const file = view && view.file; const path = file ? file.path : null;
@@ -751,6 +770,19 @@ class SettingTab extends PluginSettingTab {
   }
 }
 
+class DupNameModal extends Modal {
+  constructor(app, name) { super(app); this.name = name; }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl('h3', { text: '🔴 기기 이름 중복' });
+    contentEl.createEl('p', { text: `다른 기기가 이미 «${this.name}» 라는 이름을 쓰고 있습니다. 같은 이름이면 서로 덮어써 사고가 나므로, 이 기기의 편집·동기화를 잠갔습니다.` });
+    const g = contentEl.createEl('p', { text: '설정 → (로그인 후) 기기 이름을 «다른 이름»으로 바꾸고 「중복확인」을 누르면 풀립니다. (예: Mac / iPad / LG그램)' }); g.style.color = 'var(--text-muted)';
+    const row = contentEl.createDiv(); row.style.cssText = 'display:flex;justify-content:flex-end;margin-top:8px';
+    const ok = row.createEl('button', { text: '설정 열기' }); ok.classList.add('mod-cta');
+    ok.onclick = () => { this.close(); try { this.app.setting.open(); } catch (e) {} };
+  }
+  onClose() { this.contentEl.empty(); }
+}
 class UpdateModal extends Modal {
   constructor(app, cur, latest) { super(app); this.cur = cur; this.latest = latest; }
   onOpen() {

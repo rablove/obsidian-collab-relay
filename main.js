@@ -10611,7 +10611,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
   }
   async onLocal(file) {
-    if (this.applying || Date.now() < (this._suppressUntil || 0) || !this.configured() || !this.isMd(file) || this._ignored(file.path)) return;
+    if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured() || !this.isMd(file) || this._ignored(file.path)) return;
     const p = nfc(file.path);
     if (p === this.collabPath) return;
     let content;
@@ -10624,14 +10624,14 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     await this.upsert(p, content, file.stat && file.stat.mtime || Date.now());
   }
   async onLocalDelete(rawPath) {
-    if (this.applying || Date.now() < (this._suppressUntil || 0) || !this.configured() || !rawPath.endsWith(".md") || this._ignored(rawPath)) return;
+    if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured() || !rawPath.endsWith(".md") || this._ignored(rawPath)) return;
     const p = nfc(rawPath);
     if (p === this.collabPath) return;
     this.shadow.delete(p);
     await this.markDeleted(p);
   }
   async onLocalRename(file, oldPath) {
-    if (this.applying || Date.now() < (this._suppressUntil || 0) || !this.configured()) return;
+    if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured()) return;
     if (oldPath.endsWith(".md") && !this._ignored(oldPath)) await this.markDeleted(nfc(oldPath));
     if (this.isMd(file)) await this.onLocal(file);
   }
@@ -11256,7 +11256,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
   }
   refreshLock() {
-    const lock = this.settings.enabled && (this.isOffline() || this._gating || this._collabConnecting || this._outdated);
+    const lock = this.settings.enabled && (this.isOffline() || this._gating || this._collabConnecting || this._outdated || this._dupName);
     if (import_obsidian.Platform.isMobile) this.applyViewLock(lock);
     const view = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
     const cm = view && view.editor && view.editor.cm;
@@ -11274,7 +11274,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         }
       }
     }
-    if (lock) this.setCollab(this._outdated ? "\u{1F53A} \uC5C5\uB370\uC774\uD2B8 \uD544\uC694 \u2192 " + (this._latestVer || "") + " \xB7 \uD3B8\uC9D1\uC7A0\uAE08" : this._collabConnecting && !this.isOffline() && !this._gating ? "\u{1F504} \uB178\uD2B8 \uB3D9\uAE30\uD654 \uC911\u2026 \uD3B8\uC9D1 \uC7A0\uAE08" : "\u{1F512} \uC624\uD504\uB77C\uC778\xB7\uD3B8\uC9D1\uC7A0\uAE08");
+    if (lock) this.setCollab(this._dupName ? "\u{1F534} \uAE30\uAE30 \uC774\uB984 \xAB" + this.settings.deviceLabel + "\xBB \uC911\uBCF5 \u2014 \uC774\uB984 \uBC14\uAFD4\uC57C \uD3B8\uC9D1\xB7\uB3D9\uAE30\uD654" : this._outdated ? "\u{1F53A} \uC5C5\uB370\uC774\uD2B8 \uD544\uC694 \u2192 " + (this._latestVer || "") + " \xB7 \uD3B8\uC9D1\uC7A0\uAE08" : this._collabConnecting && !this.isOffline() && !this._gating ? "\u{1F504} \uB178\uD2B8 \uB3D9\uAE30\uD654 \uC911\u2026 \uD3B8\uC9D1 \uC7A0\uAE08" : "\u{1F512} \uC624\uD504\uB77C\uC778\xB7\uD3B8\uC9D1\uC7A0\uAE08");
     else if (this._lastLock) this.setCollab(this.session && this.session.provider && this.session.provider.wsconnected ? "\uC5F0\uACB0\uB428\xB7" + this.peerCount() : "\uC5F0\uACB0 \uC548\uB428");
     this._lastLock = lock;
   }
@@ -11359,7 +11359,37 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   }
   onPresenceChange() {
     if (this.following) this.jumpToFollowed();
-    if (!this._lastLock) this.setCollab(this.presence && this.presence.wsconnected ? "\uC5F0\uACB0\uB428\xB7" + this.peerCount() : "\uC5F0\uACB0 \uC548\uB428");
+    this.checkDupName();
+    if (!this._lastLock && !this._dupName) this.setCollab(this.presence && this.presence.wsconnected ? "\uC5F0\uACB0\uB428\xB7" + this.peerCount() : "\uC5F0\uACB0 \uC548\uB428");
+  }
+  checkDupName() {
+    try {
+      if (!this.presence) return;
+      let dup = false;
+      for (const st of this.presence.awareness.getStates().values()) {
+        const u = st && st.user;
+        if (!u || !u.deviceId) continue;
+        if ((u.login || "") === this.settings.username && (u.device || "") === this.settings.deviceLabel && u.deviceId !== this.settings.deviceId && String(this.settings.deviceId || "") > String(u.deviceId)) dup = true;
+      }
+      if (dup !== this._dupName) {
+        this._dupName = dup;
+        if (dup) {
+          try {
+            this.endSession();
+          } catch (e) {
+          }
+          if (!this._dupShown) {
+            this._dupShown = true;
+            try {
+              new DupNameModal(this.app, this.settings.deviceLabel).open();
+            } catch (e) {
+            }
+          }
+        } else this._dupShown = false;
+        this.refreshLock();
+      }
+    } catch (e) {
+    }
   }
   followScroll(session) {
     try {
@@ -11445,6 +11475,12 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   }
   async onActiveChange() {
     if (!this.settings.enabled) return;
+    if (this._dupName) {
+      this.endSession();
+      this._startingPath = null;
+      this.refreshLock();
+      return;
+    }
     this.updatePresencePath();
     const view = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
     const file = view && view.file;
@@ -11720,6 +11756,33 @@ var SettingTab = class extends import_obsidian.PluginSettingTab {
         () => this.plugin.hardReset()
       ).open();
     }));
+  }
+};
+var DupNameModal = class extends import_obsidian.Modal {
+  constructor(app, name) {
+    super(app);
+    this.name = name;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl("h3", { text: "\u{1F534} \uAE30\uAE30 \uC774\uB984 \uC911\uBCF5" });
+    contentEl.createEl("p", { text: `\uB2E4\uB978 \uAE30\uAE30\uAC00 \uC774\uBBF8 \xAB${this.name}\xBB \uB77C\uB294 \uC774\uB984\uC744 \uC4F0\uACE0 \uC788\uC2B5\uB2C8\uB2E4. \uAC19\uC740 \uC774\uB984\uC774\uBA74 \uC11C\uB85C \uB36E\uC5B4\uC368 \uC0AC\uACE0\uAC00 \uB098\uBBC0\uB85C, \uC774 \uAE30\uAE30\uC758 \uD3B8\uC9D1\xB7\uB3D9\uAE30\uD654\uB97C \uC7A0\uAC14\uC2B5\uB2C8\uB2E4.` });
+    const g = contentEl.createEl("p", { text: "\uC124\uC815 \u2192 (\uB85C\uADF8\uC778 \uD6C4) \uAE30\uAE30 \uC774\uB984\uC744 \xAB\uB2E4\uB978 \uC774\uB984\xBB\uC73C\uB85C \uBC14\uAFB8\uACE0 \u300C\uC911\uBCF5\uD655\uC778\u300D\uC744 \uB204\uB974\uBA74 \uD480\uB9BD\uB2C8\uB2E4. (\uC608: Mac / iPad / LG\uADF8\uB7A8)" });
+    g.style.color = "var(--text-muted)";
+    const row = contentEl.createDiv();
+    row.style.cssText = "display:flex;justify-content:flex-end;margin-top:8px";
+    const ok = row.createEl("button", { text: "\uC124\uC815 \uC5F4\uAE30" });
+    ok.classList.add("mod-cta");
+    ok.onclick = () => {
+      this.close();
+      try {
+        this.app.setting.open();
+      } catch (e) {
+      }
+    };
+  }
+  onClose() {
+    this.contentEl.empty();
   }
 };
 var UpdateModal = class extends import_obsidian.Modal {
