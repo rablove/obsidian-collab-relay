@@ -24,6 +24,7 @@ const DEFAULTS = {
   enabled: true,
   lastSeq: '0',
   deviceId: '',
+  lastRunVersion: '',   // 마지막으로 정상 기동한 플러그인 버전 — 이것과 다르면 서버본으로 재기준(resetOnUpgrade)
 };
 // 업데이트는 BRAT 으로만(자동설치 안 함). 단 최신 버전인지 «확인」해 안 맞으면 편집을 잠근다.
 const UPDATE_REPO = 'rablove/obsidian-collab-relay';   // 버전 확인 대상(공개 repo)
@@ -294,6 +295,7 @@ export default class VaultSyncCollab extends Plugin {
   //  밀린 변경이 대량으로 들어오는 도중 사용자가 편집해 노트가 깨지는 걸 막는다.
   async gatedSync() {
     if (this._gating || !this.configured() || this.isOffline()) return;
+    await this.resetOnUpgrade();   // 업데이트 직후면 먼저 서버본으로 재기준(로컬 버림)
     this._gating = true; this.refreshLock();
     let modal = null, last = { done: 0, total: 0 };
     const t = setTimeout(() => { try { modal = new SyncGateModal(this.app); modal.open(); modal.setProgress(last.done, last.total); } catch (e) {} }, 500);   // 오래 걸릴 때만 모달
@@ -434,14 +436,36 @@ export default class VaultSyncCollab extends Plugin {
   }
   // 처음부터 다시 받기(하드 리셋): 로컬 .md 를 전부 지우고 서버본으로 통째 갈아엎는다.
   // 안전 순서 — ①서버 전체를 먼저 받아온다(실패하면 로컬은 손대지 않음) → ②로컬 .md 삭제 → ③서버본 기록.
+  // 업데이트 직후 «서버본으로 재기준» — 이 기기의 로컬 .md 를 전부 버리고 서버본만 남긴다.
+  //  왜: 기준선(shadow)은 메모리에만 있어 재시작하면 빈다. 그러면 applyRemote 의 «첫 대면» 규칙이
+  //  수정시각이 새 쪽을 택하는데, 옛 버전에서 업로드 게이트에 막힌 채 로컬에만 쌓인 편집분이 바로 그
+  //  «새 쪽»이라 업데이트하는 순간 서버(정본)를 덮는다. 서버가 정본이라는 방침에 맞추려면 올라온 직후
+  //  로컬을 버리고 서버본으로 다시 깔아야 한다.
+  //  로컬에만 있고 서버엔 없는 노트도 같이 사라진다 — 오프라인 편집이 잠겨 있어 그런 노트는 정상 경로로
+  //  안 생긴다는 판단(형 결정, 2026-08-06).
+  //  갓 설치(_freshInstall)는 대상이 아니다 — 남의 볼트에 처음 깔면서 그 볼트를 지우면 안 된다.
+  async resetOnUpgrade() {
+    if (this._freshInstall) { this.settings.lastRunVersion = this.manifest.version; await this.saveSettings(); return; }
+    if (this.settings.lastRunVersion === this.manifest.version) return;
+    if (!this.configured() || this.isOffline()) return;   // 로그인 전·오프라인이면 다음 기동/재접속에 다시 시도
+    this._resetting = true; this.refreshLock();
+    this.endSession();                                    // 재기준 중엔 실시간 협업도 붙지 않는다
+    let modal = null;
+    try { modal = new UpgradeResetModal(this.app, this.settings.lastRunVersion, this.manifest.version); modal.open(); } catch (e) {}
+    let ok = false;
+    try { ok = await this.hardReset(); } catch (e) { console.error('[sync] resetOnUpgrade', e); }
+    if (ok) { this.settings.lastRunVersion = this.manifest.version; await this.saveSettings(); }
+    if (modal) { modal.allowClose = true; try { modal.close(); } catch (e) {} }
+    this._resetting = false; this.refreshLock();
+  }
   async hardReset() {
-    if (!this.configured()) { new Notice('먼저 설정을 채우세요'); return; }
+    if (!this.configured()) { new Notice('먼저 설정을 채우세요'); return false; }
     new Notice('서버에서 전체 받는 중…');
     const prefix = this.settings.docPrefix || '';
     const hi = prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
     const q = `${this.dbPath('_all_docs')}?include_docs=true&startkey=${encodeURIComponent(JSON.stringify(prefix))}&endkey=${encodeURIComponent(JSON.stringify(hi))}`;
     let res; try { res = await this.req('GET', q); } catch (e) { res = null; }
-    if (!res || res.status !== 200 || !res.json || !Array.isArray(res.json.rows)) { new Notice('❌ 서버에서 받기 실패 — 로컬은 그대로 둡니다'); return; }
+    if (!res || res.status !== 200 || !res.json || !Array.isArray(res.json.rows)) { new Notice('❌ 서버에서 받기 실패 — 로컬은 그대로 둡니다'); return false; }
     const docs = res.json.rows.map(r => r.doc).filter(d => d && (d.path || d._id));
     this.applying = true;   // 삭제·기록 중 로컬 이벤트가 서버로 전파되지 않게 막는다
     let del = 0, wr = 0;
@@ -457,6 +481,7 @@ export default class VaultSyncCollab extends Plugin {
     } finally { this.applying = false; this._suppressUntil = Date.now() + 12000; }   // 리셋 후 12초간 로컬→서버 전파 차단(뒤늦게 뜨는 delete 이벤트가 서버 대량삭제로 번지는 것 방지)
     try { const info = await this.req('GET', encodeURIComponent(this.settings.dbName)); if (info.status === 200 && info.json && info.json.update_seq !== undefined) { this.settings.lastSeq = info.json.update_seq; await this.saveSettings(); } } catch (e) {}
     new Notice(`♻️ 다시 받기 완료 — 로컬 ${del}개 삭제 · 서버본 ${wr}개 기록`);
+    return true;
   }
 
   /* ============ 실시간 협업 (relay) ============ */
@@ -530,7 +555,7 @@ export default class VaultSyncCollab extends Plugin {
     } catch (e) {}
   }
   refreshLock() {
-    const lock = this.settings.enabled && (this.isOffline() || this._gating || this._collabConnecting || this._outdated || this._dupName || this._harnessLock);   // 오프라인·초기동기화·협업연결중·구버전·기기이름중복·하네스정리중이면 편집 잠금
+    const lock = this.settings.enabled && (this.isOffline() || this._resetting || this._gating || this._collabConnecting || this._outdated || this._dupName || this._harnessLock);   // 오프라인·재기준중·초기동기화·협업연결중·구버전·기기이름중복·하네스정리중이면 편집 잠금
     // 모바일: CM readOnly 가 iOS 웹뷰에선 입력을 못 막는다. 그래서 노트를 «읽기 모드」로 강제 전환한다
     //  → 읽기 모드는 편집기가 아니라 렌더링 뷰라 어떤 플랫폼에서도 편집이 불가능하다. (cm 핸들 불필요)
     if (Platform.isMobile) this.applyViewLock(lock);
@@ -540,7 +565,7 @@ export default class VaultSyncCollab extends Plugin {
       let cur; try { cur = !!cm.state.readOnly; } catch (e) { cur = undefined; }
       if (cur !== lock) { try { cm.dispatch({ effects: this.editLock.reconfigure(lock ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []) }); } catch (e) {} }
     }
-    if (lock) this.setCollab(this._dupName ? ('🔴 기기 이름 «' + this.settings.deviceLabel + '» 중복 — 이름 바꿔야 편집·동기화') : this._outdated ? ('🔺 업데이트 필요 → ' + (this._latestVer || '') + ' · 편집잠금') : this._harnessLock ? '🤖 하네스가 정리하는 중… 잠시 편집 잠금' : (this._collabConnecting && !this.isOffline() && !this._gating) ? '🔄 노트 동기화 중… 편집 잠금' : '🔒 오프라인·편집잠금');
+    if (lock) this.setCollab(this._resetting ? '♻️ 서버본으로 다시 받는 중… 편집 잠금' : this._dupName ? ('🔴 기기 이름 «' + this.settings.deviceLabel + '» 중복 — 이름 바꿔야 편집·동기화') : this._outdated ? ('🔺 업데이트 필요 → ' + (this._latestVer || '') + ' · 편집잠금') : this._harnessLock ? '🤖 하네스가 정리하는 중… 잠시 편집 잠금' : (this._collabConnecting && !this.isOffline() && !this._gating) ? '🔄 노트 동기화 중… 편집 잠금' : '🔒 오프라인·편집잠금');
     else if (this._lastLock) this.setCollab((this.session && this.session.provider && this.session.provider.wsconnected) ? '연결됨·' + this.peerCount() : '연결 안됨');
     this._lastLock = lock;
     this.updateDisconnectModal();
@@ -548,7 +573,7 @@ export default class VaultSyncCollab extends Plugin {
   // 연결 안됨(오프라인/서버 도달 불가)일 때 «닫을 수 있는» 모달로 시각 표시. 편집 잠금 자체는 refreshLock 이 함(이 모달은 표시용).
   //  _outdated 는 UpdateModal(«BRAT 업데이트»)이 따로 담당, _gating/_harnessLock/_dupName 도 각자 모달이 있어 여기선 제외.
   updateDisconnectModal() {
-    const off = this.settings.enabled && this.isOffline() && !this._gating && !this._harnessLock && !this._dupName && !this._outdated;
+    const off = this.settings.enabled && this.isOffline() && !this._resetting && !this._gating && !this._harnessLock && !this._dupName && !this._outdated;
     if (off) {
       if (!this._discDismissed && !this._discModal) {
         const m = new DisconnectModal(this.app);
@@ -690,6 +715,7 @@ export default class VaultSyncCollab extends Plugin {
 
   async onActiveChange() {
     if (!this.settings.enabled) return;
+    if (this._resetting) { this.endSession(); this._startingPath = null; this.refreshLock(); return; }   // 서버본으로 재기준하는 동안은 실시간 협업도 안 붙음
     if (this._dupName) { this.endSession(); this._startingPath = null; this.refreshLock(); return; }   // 이름 충돌 중엔 협업 세션 안 붙음(잠금 유지)
     this.updatePresencePath();
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
@@ -759,7 +785,7 @@ export default class VaultSyncCollab extends Plugin {
     this.setCollab('연결 안됨'); this.refreshLock();
   }
 
-  async loadSettings() { this.settings = Object.assign({}, DEFAULTS, await this.loadData()); }
+  async loadSettings() { const raw = await this.loadData(); this._freshInstall = !raw; this.settings = Object.assign({}, DEFAULTS, raw); }
   async saveSettings() { await this.saveData(this.settings); }
 }
 
@@ -844,6 +870,20 @@ class UpdateModal extends Modal {
     const ok = row.createEl('button', { text: '확인' }); ok.classList.add('mod-cta'); ok.onclick = () => this.close();
   }
   onClose() { this.contentEl.empty(); }
+}
+class UpgradeResetModal extends Modal {   // 업데이트 직후 서버본으로 재기준하는 동안 뜬다(닫기 불가). 끝나면 자동으로 닫힌다.
+  constructor(app, from, to) { super(app); this.allowClose = false; this.from = from; this.to = to; }
+  onOpen() {
+    const { contentEl, containerEl } = this;
+    document.body.classList.add('collab-syncgate-open');   // X 숨김 CSS 는 동기화 게이트와 같은 것을 쓴다
+    try { containerEl.querySelectorAll('.modal-close-button').forEach((x) => x.remove()); } catch (e) {}
+    contentEl.createEl('h3', { text: '♻️ 업데이트됨 — 서버본으로 다시 받는 중' });
+    contentEl.createEl('p', { text: `플러그인이 ${this.from || '옛 버전'} → ${this.to} 로 올라갔습니다. 이 기기의 노트를 서버 최신본으로 다시 깝니다.` });
+    const w = contentEl.createEl('p', { text: '서버에 없고 이 기기에만 있던 노트는 사라집니다. 끝나면 자동으로 닫히고 편집·실시간 참여가 열립니다.' });
+    w.style.cssText = 'color:var(--text-muted);';
+  }
+  close() { if (this.allowClose) super.close(); }   // 완료 전엔 Esc·배경클릭·X 로 안 닫힘
+  onClose() { try { document.body.classList.remove('collab-syncgate-open'); } catch (e) {} this.contentEl.empty(); }
 }
 class SyncGateModal extends Modal {
   constructor(app) { super(app); this.allowClose = false; this.done = 0; this.total = 0; }

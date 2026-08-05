@@ -10370,7 +10370,9 @@ var DEFAULTS = {
   // 기본 ON — 오프라인이면 편집 잠금(모바일=읽기모드 강제)
   enabled: true,
   lastSeq: "0",
-  deviceId: ""
+  deviceId: "",
+  lastRunVersion: ""
+  // 마지막으로 정상 기동한 플러그인 버전 — 이것과 다르면 서버본으로 재기준(resetOnUpgrade)
 };
 var UPDATE_REPO = "rablove/obsidian-collab-relay";
 var DIAG_DIR = "60_System/_sync-diag";
@@ -10810,6 +10812,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   //  밀린 변경이 대량으로 들어오는 도중 사용자가 편집해 노트가 깨지는 걸 막는다.
   async gatedSync() {
     if (this._gating || !this.configured() || this.isOffline()) return;
+    await this.resetOnUpgrade();
     this._gating = true;
     this.refreshLock();
     let modal = null, last2 = { done: 0, total: 0 };
@@ -11121,10 +11124,55 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   }
   // 처음부터 다시 받기(하드 리셋): 로컬 .md 를 전부 지우고 서버본으로 통째 갈아엎는다.
   // 안전 순서 — ①서버 전체를 먼저 받아온다(실패하면 로컬은 손대지 않음) → ②로컬 .md 삭제 → ③서버본 기록.
+  // 업데이트 직후 «서버본으로 재기준» — 이 기기의 로컬 .md 를 전부 버리고 서버본만 남긴다.
+  //  왜: 기준선(shadow)은 메모리에만 있어 재시작하면 빈다. 그러면 applyRemote 의 «첫 대면» 규칙이
+  //  수정시각이 새 쪽을 택하는데, 옛 버전에서 업로드 게이트에 막힌 채 로컬에만 쌓인 편집분이 바로 그
+  //  «새 쪽»이라 업데이트하는 순간 서버(정본)를 덮는다. 서버가 정본이라는 방침에 맞추려면 올라온 직후
+  //  로컬을 버리고 서버본으로 다시 깔아야 한다.
+  //  로컬에만 있고 서버엔 없는 노트도 같이 사라진다 — 오프라인 편집이 잠겨 있어 그런 노트는 정상 경로로
+  //  안 생긴다는 판단(형 결정, 2026-08-06).
+  //  갓 설치(_freshInstall)는 대상이 아니다 — 남의 볼트에 처음 깔면서 그 볼트를 지우면 안 된다.
+  async resetOnUpgrade() {
+    if (this._freshInstall) {
+      this.settings.lastRunVersion = this.manifest.version;
+      await this.saveSettings();
+      return;
+    }
+    if (this.settings.lastRunVersion === this.manifest.version) return;
+    if (!this.configured() || this.isOffline()) return;
+    this._resetting = true;
+    this.refreshLock();
+    this.endSession();
+    let modal = null;
+    try {
+      modal = new UpgradeResetModal(this.app, this.settings.lastRunVersion, this.manifest.version);
+      modal.open();
+    } catch (e) {
+    }
+    let ok = false;
+    try {
+      ok = await this.hardReset();
+    } catch (e) {
+      console.error("[sync] resetOnUpgrade", e);
+    }
+    if (ok) {
+      this.settings.lastRunVersion = this.manifest.version;
+      await this.saveSettings();
+    }
+    if (modal) {
+      modal.allowClose = true;
+      try {
+        modal.close();
+      } catch (e) {
+      }
+    }
+    this._resetting = false;
+    this.refreshLock();
+  }
   async hardReset() {
     if (!this.configured()) {
       new import_obsidian.Notice("\uBA3C\uC800 \uC124\uC815\uC744 \uCC44\uC6B0\uC138\uC694");
-      return;
+      return false;
     }
     new import_obsidian.Notice("\uC11C\uBC84\uC5D0\uC11C \uC804\uCCB4 \uBC1B\uB294 \uC911\u2026");
     const prefix = this.settings.docPrefix || "";
@@ -11138,7 +11186,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
     if (!res || res.status !== 200 || !res.json || !Array.isArray(res.json.rows)) {
       new import_obsidian.Notice("\u274C \uC11C\uBC84\uC5D0\uC11C \uBC1B\uAE30 \uC2E4\uD328 \u2014 \uB85C\uCEEC\uC740 \uADF8\uB300\uB85C \uB461\uB2C8\uB2E4");
-      return;
+      return false;
     }
     const docs = res.json.rows.map((r) => r.doc).filter((d) => d && (d.path || d._id));
     this.applying = true;
@@ -11177,6 +11225,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     } catch (e) {
     }
     new import_obsidian.Notice(`\u267B\uFE0F \uB2E4\uC2DC \uBC1B\uAE30 \uC644\uB8CC \u2014 \uB85C\uCEEC ${del}\uAC1C \uC0AD\uC81C \xB7 \uC11C\uBC84\uBCF8 ${wr}\uAC1C \uAE30\uB85D`);
+    return true;
   }
   /* ============ 실시간 협업 (relay) ============ */
   httpBase() {
@@ -11286,7 +11335,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
   }
   refreshLock() {
-    const lock = this.settings.enabled && (this.isOffline() || this._gating || this._collabConnecting || this._outdated || this._dupName || this._harnessLock);
+    const lock = this.settings.enabled && (this.isOffline() || this._resetting || this._gating || this._collabConnecting || this._outdated || this._dupName || this._harnessLock);
     if (import_obsidian.Platform.isMobile) this.applyViewLock(lock);
     const view = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
     const cm = view && view.editor && view.editor.cm;
@@ -11304,7 +11353,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         }
       }
     }
-    if (lock) this.setCollab(this._dupName ? "\u{1F534} \uAE30\uAE30 \uC774\uB984 \xAB" + this.settings.deviceLabel + "\xBB \uC911\uBCF5 \u2014 \uC774\uB984 \uBC14\uAFD4\uC57C \uD3B8\uC9D1\xB7\uB3D9\uAE30\uD654" : this._outdated ? "\u{1F53A} \uC5C5\uB370\uC774\uD2B8 \uD544\uC694 \u2192 " + (this._latestVer || "") + " \xB7 \uD3B8\uC9D1\uC7A0\uAE08" : this._harnessLock ? "\u{1F916} \uD558\uB124\uC2A4\uAC00 \uC815\uB9AC\uD558\uB294 \uC911\u2026 \uC7A0\uC2DC \uD3B8\uC9D1 \uC7A0\uAE08" : this._collabConnecting && !this.isOffline() && !this._gating ? "\u{1F504} \uB178\uD2B8 \uB3D9\uAE30\uD654 \uC911\u2026 \uD3B8\uC9D1 \uC7A0\uAE08" : "\u{1F512} \uC624\uD504\uB77C\uC778\xB7\uD3B8\uC9D1\uC7A0\uAE08");
+    if (lock) this.setCollab(this._resetting ? "\u267B\uFE0F \uC11C\uBC84\uBCF8\uC73C\uB85C \uB2E4\uC2DC \uBC1B\uB294 \uC911\u2026 \uD3B8\uC9D1 \uC7A0\uAE08" : this._dupName ? "\u{1F534} \uAE30\uAE30 \uC774\uB984 \xAB" + this.settings.deviceLabel + "\xBB \uC911\uBCF5 \u2014 \uC774\uB984 \uBC14\uAFD4\uC57C \uD3B8\uC9D1\xB7\uB3D9\uAE30\uD654" : this._outdated ? "\u{1F53A} \uC5C5\uB370\uC774\uD2B8 \uD544\uC694 \u2192 " + (this._latestVer || "") + " \xB7 \uD3B8\uC9D1\uC7A0\uAE08" : this._harnessLock ? "\u{1F916} \uD558\uB124\uC2A4\uAC00 \uC815\uB9AC\uD558\uB294 \uC911\u2026 \uC7A0\uC2DC \uD3B8\uC9D1 \uC7A0\uAE08" : this._collabConnecting && !this.isOffline() && !this._gating ? "\u{1F504} \uB178\uD2B8 \uB3D9\uAE30\uD654 \uC911\u2026 \uD3B8\uC9D1 \uC7A0\uAE08" : "\u{1F512} \uC624\uD504\uB77C\uC778\xB7\uD3B8\uC9D1\uC7A0\uAE08");
     else if (this._lastLock) this.setCollab(this.session && this.session.provider && this.session.provider.wsconnected ? "\uC5F0\uACB0\uB428\xB7" + this.peerCount() : "\uC5F0\uACB0 \uC548\uB428");
     this._lastLock = lock;
     this.updateDisconnectModal();
@@ -11312,7 +11361,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   // 연결 안됨(오프라인/서버 도달 불가)일 때 «닫을 수 있는» 모달로 시각 표시. 편집 잠금 자체는 refreshLock 이 함(이 모달은 표시용).
   //  _outdated 는 UpdateModal(«BRAT 업데이트»)이 따로 담당, _gating/_harnessLock/_dupName 도 각자 모달이 있어 여기선 제외.
   updateDisconnectModal() {
-    const off = this.settings.enabled && this.isOffline() && !this._gating && !this._harnessLock && !this._dupName && !this._outdated;
+    const off = this.settings.enabled && this.isOffline() && !this._resetting && !this._gating && !this._harnessLock && !this._dupName && !this._outdated;
     if (off) {
       if (!this._discDismissed && !this._discModal) {
         const m = new DisconnectModal(this.app);
@@ -11533,6 +11582,12 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   }
   async onActiveChange() {
     if (!this.settings.enabled) return;
+    if (this._resetting) {
+      this.endSession();
+      this._startingPath = null;
+      this.refreshLock();
+      return;
+    }
     if (this._dupName) {
       this.endSession();
       this._startingPath = null;
@@ -11737,7 +11792,9 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     this.refreshLock();
   }
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULTS, await this.loadData());
+    const raw = await this.loadData();
+    this._freshInstall = !raw;
+    this.settings = Object.assign({}, DEFAULTS, raw);
   }
   async saveSettings() {
     await this.saveData(this.settings);
@@ -11903,6 +11960,38 @@ var UpdateModal = class extends import_obsidian.Modal {
     ok.onclick = () => this.close();
   }
   onClose() {
+    this.contentEl.empty();
+  }
+};
+var UpgradeResetModal = class extends import_obsidian.Modal {
+  // 업데이트 직후 서버본으로 재기준하는 동안 뜬다(닫기 불가). 끝나면 자동으로 닫힌다.
+  constructor(app, from2, to) {
+    super(app);
+    this.allowClose = false;
+    this.from = from2;
+    this.to = to;
+  }
+  onOpen() {
+    const { contentEl, containerEl } = this;
+    document.body.classList.add("collab-syncgate-open");
+    try {
+      containerEl.querySelectorAll(".modal-close-button").forEach((x) => x.remove());
+    } catch (e) {
+    }
+    contentEl.createEl("h3", { text: "\u267B\uFE0F \uC5C5\uB370\uC774\uD2B8\uB428 \u2014 \uC11C\uBC84\uBCF8\uC73C\uB85C \uB2E4\uC2DC \uBC1B\uB294 \uC911" });
+    contentEl.createEl("p", { text: `\uD50C\uB7EC\uADF8\uC778\uC774 ${this.from || "\uC61B \uBC84\uC804"} \u2192 ${this.to} \uB85C \uC62C\uB77C\uAC14\uC2B5\uB2C8\uB2E4. \uC774 \uAE30\uAE30\uC758 \uB178\uD2B8\uB97C \uC11C\uBC84 \uCD5C\uC2E0\uBCF8\uC73C\uB85C \uB2E4\uC2DC \uAE5D\uB2C8\uB2E4.` });
+    const w = contentEl.createEl("p", { text: "\uC11C\uBC84\uC5D0 \uC5C6\uACE0 \uC774 \uAE30\uAE30\uC5D0\uB9CC \uC788\uB358 \uB178\uD2B8\uB294 \uC0AC\uB77C\uC9D1\uB2C8\uB2E4. \uB05D\uB098\uBA74 \uC790\uB3D9\uC73C\uB85C \uB2EB\uD788\uACE0 \uD3B8\uC9D1\xB7\uC2E4\uC2DC\uAC04 \uCC38\uC5EC\uAC00 \uC5F4\uB9BD\uB2C8\uB2E4." });
+    w.style.cssText = "color:var(--text-muted);";
+  }
+  close() {
+    if (this.allowClose) super.close();
+  }
+  // 완료 전엔 Esc·배경클릭·X 로 안 닫힘
+  onClose() {
+    try {
+      document.body.classList.remove("collab-syncgate-open");
+    } catch (e) {
+    }
     this.contentEl.empty();
   }
 };
