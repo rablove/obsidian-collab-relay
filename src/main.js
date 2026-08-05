@@ -639,14 +639,17 @@ export default class VaultSyncCollab extends Plugin {
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
     const file = view && view.file; const path = file ? file.path : null;
     if (this.session && this.session.path === path) return;
+    if (this._startingPath === path) return;             // 같은 노트 세션을 이미 시작하는 중 → 중복 provider 방지(active-leaf-change+file-open 이중발화 경합)
+    this._startingPath = path;
     this.endSession();
-    if (!view || !file || !this.settings.wsUrl) { this.refreshLock(); return; }
-    const cm = view.editor && view.editor.cm; if (!cm) return;
+    if (!view || !file || !this.settings.wsUrl) { this._startingPath = null; this.refreshLock(); return; }
+    const cm = view.editor && view.editor.cm; if (!cm) { this._startingPath = null; return; }
     this.collabPath = nfc(path);                         // 즉시 보호: 파일동기화가 이 노트를 덮지 않게
     this._collabConnecting = true; this.refreshLock();   // 협업이 붙기 전까지 편집 잠금(내가 친 게 나중에 덮이는 것 방지)
     clearTimeout(this._connectTimer);
     this._connectTimer = setTimeout(() => { this._collabConnecting = false; this.refreshLock(); }, 6000);   // 협업이 못 붙어도 6초 후 편집 허용(collabPath 로 보호된 파일동기화 모드)
-    await this.startSession(file, cm); this.refreshLock();
+    try { await this.startSession(file, cm); } finally { this._startingPath = null; }
+    this.refreshLock();
   }
   async startSession(file, cm) {
     const token = await this.getToken(); if (!token) { this.setCollab('로그인 필요'); this._collabConnecting = false; try { clearTimeout(this._connectTimer); } catch (e) {} this.refreshLock(); return; }

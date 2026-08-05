@@ -11450,13 +11450,19 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     const file = view && view.file;
     const path = file ? file.path : null;
     if (this.session && this.session.path === path) return;
+    if (this._startingPath === path) return;
+    this._startingPath = path;
     this.endSession();
     if (!view || !file || !this.settings.wsUrl) {
+      this._startingPath = null;
       this.refreshLock();
       return;
     }
     const cm = view.editor && view.editor.cm;
-    if (!cm) return;
+    if (!cm) {
+      this._startingPath = null;
+      return;
+    }
     this.collabPath = nfc(path);
     this._collabConnecting = true;
     this.refreshLock();
@@ -11465,7 +11471,11 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       this._collabConnecting = false;
       this.refreshLock();
     }, 6e3);
-    await this.startSession(file, cm);
+    try {
+      await this.startSession(file, cm);
+    } finally {
+      this._startingPath = null;
+    }
     this.refreshLock();
   }
   async startSession(file, cm) {
