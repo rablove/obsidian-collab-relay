@@ -10357,7 +10357,7 @@ var import_state = require("@codemirror/state");
 var import_view = require("@codemirror/view");
 var DEFAULTS = {
   couchUrl: "https://obsidian.enfycius.com",
-  // CouchDB (파일 동기화) — private repo 라 기본값
+  // CouchDB (파일 동기화). ⚠️ 이 repo 는 공개다 — 비밀값을 기본값으로 넣지 마라
   wsUrl: "wss://collab.smallws.com",
   // relay (실시간 협업)
   dbName: "main-db",
@@ -10373,6 +10373,7 @@ var DEFAULTS = {
   deviceId: ""
 };
 var UPDATE_REPO = "rablove/obsidian-collab-relay";
+var DIAG_DIR = "60_System/_sync-diag";
 var nfc = (s) => s.normalize("NFC");
 function merge3(baseS, aS, bS) {
   const L = (s) => s.split("\n");
@@ -10675,7 +10676,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
           return;
         }
         if (rel !== "a") {
-          await this.logConflict(pNfc, "upsert", base, content, server.content, mtime, server.mtime || 0, server.lastEditor);
+          await this.logConflict(pNfc, "upsert", base, content, server.content, mtime, server.mtime || 0, server.lastEditor, server.clientVersion);
           if (mtime >= (server.mtime || 0)) {
             await this.saveConflictCopy(pNfc, server.content, server.mtime || Date.now(), "server");
           } else {
@@ -10953,7 +10954,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         this.shadow.set(p, local);
         return true;
       }
-      await this.logConflict(p, "applyRemote", base, local, R, lm, doc2.mtime || 0, doc2.lastEditor);
+      await this.logConflict(p, "applyRemote", base, local, R, lm, doc2.mtime || 0, doc2.lastEditor, doc2.clientVersion);
       if ((doc2.mtime || 0) >= lm) {
         await this.saveConflictCopy(p, local, lm, this.settings.deviceId || "local");
         await this.writeLocal(p, R);
@@ -11023,7 +11024,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     while (i < m && a[i] === b[i]) i++;
     return { i, local: a.slice(Math.max(0, i - 14), i + 14), server: b.slice(Math.max(0, i - 14), i + 14) };
   }
-  async logConflict(p, where, base, local, server, localMtime, serverMtime, serverLastEditor) {
+  async logConflict(p, where, base, local, server, localMtime, serverMtime, serverLastEditor, serverClientVersion) {
     try {
       const d = this._diffAt(local, server);
       const rec = {
@@ -11044,7 +11045,10 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         collabOpen: nfc(p) === this.collabPath,
         deviceId: this.settings.deviceId,
         device: this.settings.deviceLabel,
-        user: this.settings.username
+        user: this.settings.username,
+        // 어느 버전끼리 갈렸나 — «옛 기기가 밀어넣었나」를 판별하는 핵심 신호.
+        clientVersion: this.manifest.version,
+        serverClientVersion: serverClientVersion || null
       };
       console.warn("[collab] \uCDA9\uB3CC \uB85C\uADF8", rec);
       const f = `${this.app.vault.configDir}/plugins/${this.manifest.id}/conflict-log.jsonl`;
@@ -11059,8 +11063,24 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         }
         await this.app.vault.adapter.write(f, prev + line);
       }
+      await this.reportConflict(rec);
     } catch (e) {
       console.error("[collab] logConflict", e);
+    }
+  }
+  // 같은 레코드를 서버에도 남긴다 — 기기 로컬 jsonl 은 그 기기에서만 보여, 어느 기기·어떤 상황에서 충돌이
+  // 나는지 «모아서» 볼 수가 없다. 레코드마다 _id 가 달라 리비전 경합이 없다.
+  // 구버전 pull-only(_outdated)여도 보낸다 — 옛 기기의 충돌이야말로 봐야 할 것이다.
+  async reportConflict(rec) {
+    try {
+      if (!this.configured()) return;
+      const stamp = rec.t.replace(/[:.]/g, "-");
+      const rnd = Math.random().toString(36).slice(2, 7);
+      const p = `${DIAG_DIR}/${stamp}-${rec.deviceId || "unknown"}-${rnd}.json`;
+      const id2 = this.idFor(p);
+      await this.req("PUT", this.docUrl(id2), { _id: id2, path: p, kind: "conflict", mtime: Date.now(), deleted: false, clientVersion: this.manifest.version, rec });
+    } catch (e) {
+      console.error("[collab] reportConflict", e);
     }
   }
   async readConflictLog() {

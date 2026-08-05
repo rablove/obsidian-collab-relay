@@ -13,7 +13,7 @@ import { EditorView } from '@codemirror/view';
  */
 
 const DEFAULTS = {
-  couchUrl: 'https://obsidian.enfycius.com',   // CouchDB (파일 동기화) — private repo 라 기본값
+  couchUrl: 'https://obsidian.enfycius.com',   // CouchDB (파일 동기화). ⚠️ 이 repo 는 공개다 — 비밀값을 기본값으로 넣지 마라
   wsUrl: 'wss://collab.smallws.com',           // relay (실시간 협업)
   dbName: 'main-db',
   docPrefix: 'cvs:',
@@ -27,6 +27,9 @@ const DEFAULTS = {
 };
 // 업데이트는 BRAT 으로만(자동설치 안 함). 단 최신 버전인지 «확인」해 안 맞으면 편집을 잠근다.
 const UPDATE_REPO = 'rablove/obsidian-collab-relay';   // 버전 확인 대상(공개 repo)
+// 충돌 진단 레코드를 모아 두는 서버상의 자리. 경로가 `.md` 로 끝나지 않아 applyRemote 가 걸러내므로
+// 어느 기기에도 파일로 내려가지 않는다(진단 전용). 읽기·집계는 하네스 `conflicts.py events`.
+const DIAG_DIR = '60_System/_sync-diag';
 const nfc = (s) => s.normalize('NFC');
 // 3-way 병합: base(공통기준)·A(로컬)·B(서버). 겹치지 않는 편집은 합치고, 같은 지점 삽입은 결정적 순서로 둘 다 보존.
 //  같은 줄을 서로 다르게 고친 «진짜 충돌」이거나 안전검증 실패면 null → 호출부가 기존(사본) 처리로 폴백.
@@ -209,7 +212,7 @@ export default class VaultSyncCollab extends Plugin {
         const rel = this._relate(content, server.content);   // 병합 불가 → 사소한 포함관계면 상위집합
         if (rel === 'b') { await this.writeLocal(pNfc, server.content); this.shadow.set(pNfc, server.content); return; }   // 서버가 상위집합 → 서버본
         if (rel !== 'a') {   // 'a'(local 상위집합)면 아래 putDoc 로 올림. 그 외 진짜 분기만 사본.
-          await this.logConflict(pNfc, 'upsert', base, content, server.content, mtime, server.mtime || 0, server.lastEditor);
+          await this.logConflict(pNfc, 'upsert', base, content, server.content, mtime, server.mtime || 0, server.lastEditor, server.clientVersion);
           if (mtime >= (server.mtime || 0)) { await this.saveConflictCopy(pNfc, server.content, server.mtime || Date.now(), 'server'); }
           else { await this.saveConflictCopy(pNfc, content, mtime, this.settings.deviceId || 'local'); await this.writeLocal(pNfc, server.content); this.shadow.set(pNfc, server.content); return; }
         }
@@ -354,7 +357,7 @@ export default class VaultSyncCollab extends Plugin {
       const rel = this._relate(local, R);   // 병합 불가(진짜 겹침) → 사소한 포함관계면 상위집합
       if (rel === 'equal' || rel === 'b') { await this.writeLocal(p, R); this.shadow.set(p, R); return true; }   // R 이 상위집합 → 서버본
       if (rel === 'a') { await this.putDoc(p, local, lm); this.shadow.set(p, local); return true; }               // local 이 상위집합 → 올림
-      await this.logConflict(p, 'applyRemote', base, local, R, lm, doc.mtime || 0, doc.lastEditor);
+      await this.logConflict(p, 'applyRemote', base, local, R, lm, doc.mtime || 0, doc.lastEditor, doc.clientVersion);
       if ((doc.mtime || 0) >= lm) { await this.saveConflictCopy(p, local, lm, this.settings.deviceId || 'local'); await this.writeLocal(p, R); this.shadow.set(p, R); }
       else { await this.saveConflictCopy(p, R, doc.mtime || 0, 'server'); await this.putDoc(p, local, lm); }
       return true;
@@ -381,7 +384,7 @@ export default class VaultSyncCollab extends Plugin {
   async writeLocal(p, content) { await this.ensureParent(p); this.applying = true; try { await this.app.vault.adapter.write(p, content); } finally { this.applying = false; } }
   tstamp() { const d = new Date(), z = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}${z(d.getMinutes())}`; }
   _diffAt(a, b) { a = a || ''; b = b || ''; let i = 0; const m = Math.min(a.length, b.length); while (i < m && a[i] === b[i]) i++; return { i, local: a.slice(Math.max(0, i - 14), i + 14), server: b.slice(Math.max(0, i - 14), i + 14) }; }
-  async logConflict(p, where, base, local, server, localMtime, serverMtime, serverLastEditor) {
+  async logConflict(p, where, base, local, server, localMtime, serverMtime, serverLastEditor, serverClientVersion) {
     try {
       const d = this._diffAt(local, server);
       const rec = { t: new Date().toISOString(), where, path: p,
@@ -389,13 +392,29 @@ export default class VaultSyncCollab extends Plugin {
         localChanged: (base || '') !== (local || ''), serverChanged: (base || '') !== (server || ''),
         localMtime, serverMtime, serverLastEditor: serverLastEditor || null,
         firstDiff: d.i, aroundLocal: d.local, aroundServer: d.server,
-        collabOpen: nfc(p) === this.collabPath, deviceId: this.settings.deviceId, device: this.settings.deviceLabel, user: this.settings.username };
+        collabOpen: nfc(p) === this.collabPath, deviceId: this.settings.deviceId, device: this.settings.deviceLabel, user: this.settings.username,
+        // 어느 버전끼리 갈렸나 — «옛 기기가 밀어넣었나」를 판별하는 핵심 신호.
+        clientVersion: this.manifest.version, serverClientVersion: serverClientVersion || null };
       console.warn('[collab] 충돌 로그', rec);
       const f = `${this.app.vault.configDir}/plugins/${this.manifest.id}/conflict-log.jsonl`;
       const line = JSON.stringify(rec) + '\n';
       try { await this.app.vault.adapter.append(f, line); }
       catch (e) { let prev = ''; try { if (await this.app.vault.adapter.exists(f)) prev = await this.app.vault.adapter.read(f); } catch (e2) {} await this.app.vault.adapter.write(f, prev + line); }
+      await this.reportConflict(rec);
     } catch (e) { console.error('[collab] logConflict', e); }
+  }
+  // 같은 레코드를 서버에도 남긴다 — 기기 로컬 jsonl 은 그 기기에서만 보여, 어느 기기·어떤 상황에서 충돌이
+  // 나는지 «모아서» 볼 수가 없다. 레코드마다 _id 가 달라 리비전 경합이 없다.
+  // 구버전 pull-only(_outdated)여도 보낸다 — 옛 기기의 충돌이야말로 봐야 할 것이다.
+  async reportConflict(rec) {
+    try {
+      if (!this.configured()) return;
+      const stamp = rec.t.replace(/[:.]/g, '-');
+      const rnd = Math.random().toString(36).slice(2, 7);
+      const p = `${DIAG_DIR}/${stamp}-${rec.deviceId || 'unknown'}-${rnd}.json`;
+      const id = this.idFor(p);
+      await this.req('PUT', this.docUrl(id), { _id: id, path: p, kind: 'conflict', mtime: Date.now(), deleted: false, clientVersion: this.manifest.version, rec });
+    } catch (e) { console.error('[collab] reportConflict', e); }
   }
   async readConflictLog() {
     try { const f = `${this.app.vault.configDir}/plugins/${this.manifest.id}/conflict-log.jsonl`; if (await this.app.vault.adapter.exists(f)) return await this.app.vault.adapter.read(f); } catch (e) {}
