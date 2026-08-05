@@ -105,6 +105,7 @@ export default class VaultSyncCollab extends Plugin {
   setCollab(s) { if (this.collabEl) this.collabEl.setText('👥 ' + s); }
   configured() { return this.settings.enabled && this.settings.couchUrl && this.settings.dbName && this.settings.username; }
   isMd(f) { return f && f.extension === 'md'; }
+  _ignored(p) { return /(^|\/)\./.test(String(p || '')); }   // .trash/·.obsidian/ 등 숨김폴더 경로는 동기화 제외 — 삭제본이 되살아나거나 cvs:.trash/… 엉뚱한 문서 생기는 것 방지
 
   /* ============ 파일 동기화 (CouchDB) ============ */
   async req(method, path, body) {
@@ -130,7 +131,7 @@ export default class VaultSyncCollab extends Plugin {
   }
 
   async onLocal(file) {
-    if (this.applying || !this.configured() || !this.isMd(file)) return;
+    if (this.applying || !this.configured() || !this.isMd(file) || this._ignored(file.path)) return;
     const p = nfc(file.path);
     if (p === this.collabPath) return;   // 협업 중인 노트는 relay 가 처리 (겹침 방지)
     let content; try { content = await this.app.vault.adapter.read(file.path); } catch (e) { return; }
@@ -138,14 +139,14 @@ export default class VaultSyncCollab extends Plugin {
     await this.upsert(p, content, (file.stat && file.stat.mtime) || Date.now());
   }
   async onLocalDelete(rawPath) {
-    if (this.applying || !this.configured() || !rawPath.endsWith('.md')) return;
+    if (this.applying || !this.configured() || !rawPath.endsWith('.md') || this._ignored(rawPath)) return;
     const p = nfc(rawPath); if (p === this.collabPath) return;
     this.shadow.delete(p); await this.markDeleted(p);
   }
   async onLocalRename(file, oldPath) {
     if (this.applying || !this.configured()) return;
-    if (oldPath.endsWith('.md')) await this.markDeleted(nfc(oldPath));
-    if (this.isMd(file)) await this.onLocal(file);
+    if (oldPath.endsWith('.md') && !this._ignored(oldPath)) await this.markDeleted(nfc(oldPath));
+    if (this.isMd(file)) await this.onLocal(file);   // onLocal 이 .trash 경로는 알아서 무시
   }
 
   async putDoc(pNfc, content, mtime) {
@@ -273,7 +274,7 @@ export default class VaultSyncCollab extends Plugin {
     // 삭제 tombstone 은 path 가 없다 → _id 에서 접두어(cvs:)를 벗겨 실제 로컬 경로를 얻는다.
     const _pfx = this.settings.docPrefix || '';
     const p = doc.path || ((doc._id && doc._id.indexOf(_pfx) === 0) ? doc._id.slice(_pfx.length) : doc._id);
-    if (!p.endsWith('.md')) return false;
+    if (!p.endsWith('.md') || this._ignored(p)) return false;
     if (nfc(p) === this.collabPath) return false;   // 협업 중인 노트 → relay(Yjs)가 소유, 건드리지 않음
     const R = doc.content || '';
     try {

@@ -10484,6 +10484,10 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   isMd(f) {
     return f && f.extension === "md";
   }
+  _ignored(p) {
+    return /(^|\/)\./.test(String(p || ""));
+  }
+  // .trash/·.obsidian/ 등 숨김폴더 경로는 동기화 제외 — 삭제본이 되살아나거나 cvs:.trash/… 엉뚱한 문서 생기는 것 방지
   /* ============ 파일 동기화 (CouchDB) ============ */
   async req(method, path, body) {
     const base = (this.settings.couchUrl || "").replace(/\/$/, "");
@@ -10514,7 +10518,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
   }
   async onLocal(file) {
-    if (this.applying || !this.configured() || !this.isMd(file)) return;
+    if (this.applying || !this.configured() || !this.isMd(file) || this._ignored(file.path)) return;
     const p = nfc(file.path);
     if (p === this.collabPath) return;
     let content;
@@ -10527,7 +10531,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     await this.upsert(p, content, file.stat && file.stat.mtime || Date.now());
   }
   async onLocalDelete(rawPath) {
-    if (this.applying || !this.configured() || !rawPath.endsWith(".md")) return;
+    if (this.applying || !this.configured() || !rawPath.endsWith(".md") || this._ignored(rawPath)) return;
     const p = nfc(rawPath);
     if (p === this.collabPath) return;
     this.shadow.delete(p);
@@ -10535,7 +10539,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   }
   async onLocalRename(file, oldPath) {
     if (this.applying || !this.configured()) return;
-    if (oldPath.endsWith(".md")) await this.markDeleted(nfc(oldPath));
+    if (oldPath.endsWith(".md") && !this._ignored(oldPath)) await this.markDeleted(nfc(oldPath));
     if (this.isMd(file)) await this.onLocal(file);
   }
   async putDoc(pNfc, content, mtime) {
@@ -10763,7 +10767,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   async applyRemote(doc2) {
     const _pfx = this.settings.docPrefix || "";
     const p = doc2.path || (doc2._id && doc2._id.indexOf(_pfx) === 0 ? doc2._id.slice(_pfx.length) : doc2._id);
-    if (!p.endsWith(".md")) return false;
+    if (!p.endsWith(".md") || this._ignored(p)) return false;
     if (nfc(p) === this.collabPath) return false;
     const R = doc2.content || "";
     try {
