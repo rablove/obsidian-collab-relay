@@ -28,6 +28,33 @@ const DEFAULTS = {
 // 업데이트는 BRAT 으로만(자동설치 안 함). 단 최신 버전인지 «확인」해 안 맞으면 편집을 잠근다.
 const UPDATE_REPO = 'rablove/obsidian-collab-relay';   // 버전 확인 대상(공개 repo)
 const nfc = (s) => s.normalize('NFC');
+// 3-way 병합: base(공통기준)·A(로컬)·B(서버). 겹치지 않는 편집은 합치고, 같은 지점 삽입은 결정적 순서로 둘 다 보존.
+//  같은 줄을 서로 다르게 고친 «진짜 충돌」이거나 안전검증 실패면 null → 호출부가 기존(사본) 처리로 폴백.
+function merge3(baseS, aS, bS) {
+  const L = (s) => s.split('\n');
+  const lcs = (x, y) => { const n = x.length, m = y.length; const c = Array.from({ length: n + 1 }, () => new Int32Array(m + 1)); for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) c[i][j] = x[i] === y[j] ? c[i + 1][j + 1] + 1 : Math.max(c[i + 1][j], c[i][j + 1]); const o = []; let i = 0, j = 0; while (i < n && j < m) { if (x[i] === y[j]) { o.push([i, j]); i++; j++; } else if (c[i + 1][j] >= c[i][j + 1]) i++; else j++; } return o; };
+  const hunks = (O, X) => { const m = lcs(O, X).concat([[O.length, X.length]]); const h = []; let oi = 0, xi = 0; for (const [oc, xc] of m) { if (oi < oc || xi < xc) h.push([oi, oc, X.slice(xi, xc)]); oi = oc + 1; xi = xc + 1; } return h; };
+  const O = L(baseS), A = L(aS), B = L(bS); const ha = hunks(O, A), hb = hunks(O, B); const res = []; let oi = 0, ia = 0, ib = 0;
+  while (true) {
+    const na = ia < ha.length ? ha[ia] : null, nb = ib < hb.length ? hb[ib] : null;
+    const as = na ? na[0] : Infinity, bs = nb ? nb[0] : Infinity;
+    if (as === Infinity && bs === Infinity) { for (let k = oi; k < O.length; k++) res.push(O[k]); break; }
+    const nx = Math.min(as, bs); for (let k = oi; k < nx; k++) res.push(O[k]); oi = nx;
+    const aH = na && na[0] === oi ? na : null, bH = nb && nb[0] === oi ? nb : null;
+    if (aH && bH) {
+      if (aH[1] === bH[1] && JSON.stringify(aH[2]) === JSON.stringify(bH[2])) { res.push(...aH[2]); oi = aH[1]; ia++; ib++; }
+      else if (aH[0] === aH[1] && bH[0] === bH[1]) { const x = aH[2], y = bH[2]; if (x.join('\n') <= y.join('\n')) res.push(...x, ...y); else res.push(...y, ...x); ia++; ib++; }
+      else return null;
+    } else if (aH) { if (nb === null || nb[0] >= aH[1]) { res.push(...aH[2]); oi = aH[1]; ia++; } else return null; }
+    else if (bH) { if (na === null || na[0] >= bH[1]) { res.push(...bH[2]); oi = bH[1]; ib++; } else return null; }
+    else break;
+  }
+  const merged = res.join('\n'); const sO = new Set(O), sM = new Set(L(merged));
+  for (const l of A) if (!sO.has(l) && !sM.has(l)) return null;
+  for (const l of B) if (!sO.has(l) && !sM.has(l)) return null;
+  const al = new Set([...O, ...A, ...B]); for (const l of L(merged)) if (!al.has(l)) return null;
+  return merged;
+}
 const b64 = (s) => btoa(unescape(encodeURIComponent(s)));
 const b64url = (s) => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -176,7 +203,9 @@ export default class VaultSyncCollab extends Plugin {
       const server = (cur.status === 200 && cur.json) ? cur.json : null;
       const base = this.shadow.get(pNfc);
       if (server && !server.deleted && server.content !== undefined && server.content !== content && base !== undefined && server.content !== base) {
-        const rel = this._relate(content, server.content);   // 사소한 포함관계면 사본 없이 상위집합 채택
+        const merged = merge3(base, content, server.content);   // 3-way 병합 — 겹치지 않으면 사본 없이 합침
+        if (merged !== null) { await this.writeLocal(pNfc, merged); this.shadow.set(pNfc, merged); await this.putDoc(pNfc, merged, Math.max(mtime, server.mtime || 0)); return; }
+        const rel = this._relate(content, server.content);   // 병합 불가 → 사소한 포함관계면 상위집합
         if (rel === 'b') { await this.writeLocal(pNfc, server.content); this.shadow.set(pNfc, server.content); return; }   // 서버가 상위집합 → 서버본
         if (rel !== 'a') {   // 'a'(local 상위집합)면 아래 putDoc 로 올림. 그 외 진짜 분기만 사본.
           await this.logConflict(pNfc, 'upsert', base, content, server.content, mtime, server.mtime || 0, server.lastEditor);
@@ -314,7 +343,13 @@ export default class VaultSyncCollab extends Plugin {
       if (local === base) { await this.writeLocal(p, R); this.shadow.set(p, R); return true; }  // 서버만 바뀜 → 서버로
       // 기준선 대비 양쪽 다 바뀜 → 진짜 동시편집 충돌 → 사본 보관
       const st = await this.app.vault.adapter.stat(p); const lm = st ? st.mtime : 0;
-      const rel = this._relate(local, R);   // 사소한 포함관계면 사본 없이 상위집합 채택(고유 내용 없으니 손실 없음)
+      const merged = merge3(base, local, R);   // 3-way 병합 — 겹치지 않으면 사본 없이 합침(양쪽 보존·수렴)
+      if (merged !== null) {
+        await this.writeLocal(p, merged); this.shadow.set(p, merged);
+        if (merged !== R) await this.putDoc(p, merged, Math.max(lm, doc.mtime || 0));   // 서버도 병합본으로
+        return true;
+      }
+      const rel = this._relate(local, R);   // 병합 불가(진짜 겹침) → 사소한 포함관계면 상위집합
       if (rel === 'equal' || rel === 'b') { await this.writeLocal(p, R); this.shadow.set(p, R); return true; }   // R 이 상위집합 → 서버본
       if (rel === 'a') { await this.putDoc(p, local, lm); this.shadow.set(p, local); return true; }               // local 이 상위집합 → 올림
       await this.logConflict(p, 'applyRemote', base, local, R, lm, doc.mtime || 0, doc.lastEditor);

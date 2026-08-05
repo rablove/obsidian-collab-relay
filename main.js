@@ -10374,6 +10374,85 @@ var DEFAULTS = {
 };
 var UPDATE_REPO = "rablove/obsidian-collab-relay";
 var nfc = (s) => s.normalize("NFC");
+function merge3(baseS, aS, bS) {
+  const L = (s) => s.split("\n");
+  const lcs = (x, y) => {
+    const n = x.length, m = y.length;
+    const c = Array.from({ length: n + 1 }, () => new Int32Array(m + 1));
+    for (let i2 = n - 1; i2 >= 0; i2--) for (let j2 = m - 1; j2 >= 0; j2--) c[i2][j2] = x[i2] === y[j2] ? c[i2 + 1][j2 + 1] + 1 : Math.max(c[i2 + 1][j2], c[i2][j2 + 1]);
+    const o = [];
+    let i = 0, j = 0;
+    while (i < n && j < m) {
+      if (x[i] === y[j]) {
+        o.push([i, j]);
+        i++;
+        j++;
+      } else if (c[i + 1][j] >= c[i][j + 1]) i++;
+      else j++;
+    }
+    return o;
+  };
+  const hunks = (O2, X) => {
+    const m = lcs(O2, X).concat([[O2.length, X.length]]);
+    const h = [];
+    let oi2 = 0, xi = 0;
+    for (const [oc, xc] of m) {
+      if (oi2 < oc || xi < xc) h.push([oi2, oc, X.slice(xi, xc)]);
+      oi2 = oc + 1;
+      xi = xc + 1;
+    }
+    return h;
+  };
+  const O = L(baseS), A = L(aS), B = L(bS);
+  const ha = hunks(O, A), hb = hunks(O, B);
+  const res = [];
+  let oi = 0, ia = 0, ib = 0;
+  while (true) {
+    const na = ia < ha.length ? ha[ia] : null, nb = ib < hb.length ? hb[ib] : null;
+    const as = na ? na[0] : Infinity, bs = nb ? nb[0] : Infinity;
+    if (as === Infinity && bs === Infinity) {
+      for (let k = oi; k < O.length; k++) res.push(O[k]);
+      break;
+    }
+    const nx = Math.min(as, bs);
+    for (let k = oi; k < nx; k++) res.push(O[k]);
+    oi = nx;
+    const aH = na && na[0] === oi ? na : null, bH = nb && nb[0] === oi ? nb : null;
+    if (aH && bH) {
+      if (aH[1] === bH[1] && JSON.stringify(aH[2]) === JSON.stringify(bH[2])) {
+        res.push(...aH[2]);
+        oi = aH[1];
+        ia++;
+        ib++;
+      } else if (aH[0] === aH[1] && bH[0] === bH[1]) {
+        const x = aH[2], y = bH[2];
+        if (x.join("\n") <= y.join("\n")) res.push(...x, ...y);
+        else res.push(...y, ...x);
+        ia++;
+        ib++;
+      } else return null;
+    } else if (aH) {
+      if (nb === null || nb[0] >= aH[1]) {
+        res.push(...aH[2]);
+        oi = aH[1];
+        ia++;
+      } else return null;
+    } else if (bH) {
+      if (na === null || na[0] >= bH[1]) {
+        res.push(...bH[2]);
+        oi = bH[1];
+        ib++;
+      } else return null;
+    } else break;
+  }
+  const merged = res.join("\n");
+  const sO = new Set(O), sM = new Set(L(merged));
+  for (const l of A) if (!sO.has(l) && !sM.has(l)) return null;
+  for (const l of B) if (!sO.has(l) && !sM.has(l)) return null;
+  const al = /* @__PURE__ */ new Set([...O, ...A, ...B]);
+  for (const l of L(merged)) if (!al.has(l)) return null;
+  return merged;
+}
 var b64 = (s) => btoa(unescape(encodeURIComponent(s)));
 var b64url = (s) => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -10574,6 +10653,13 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       const server = cur.status === 200 && cur.json ? cur.json : null;
       const base = this.shadow.get(pNfc);
       if (server && !server.deleted && server.content !== void 0 && server.content !== content && base !== void 0 && server.content !== base) {
+        const merged = merge3(base, content, server.content);
+        if (merged !== null) {
+          await this.writeLocal(pNfc, merged);
+          this.shadow.set(pNfc, merged);
+          await this.putDoc(pNfc, merged, Math.max(mtime, server.mtime || 0));
+          return;
+        }
         const rel = this._relate(content, server.content);
         if (rel === "b") {
           await this.writeLocal(pNfc, server.content);
@@ -10839,6 +10925,13 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       }
       const st = await this.app.vault.adapter.stat(p);
       const lm = st ? st.mtime : 0;
+      const merged = merge3(base, local, R);
+      if (merged !== null) {
+        await this.writeLocal(p, merged);
+        this.shadow.set(p, merged);
+        if (merged !== R) await this.putDoc(p, merged, Math.max(lm, doc2.mtime || 0));
+        return true;
+      }
       const rel = this._relate(local, R);
       if (rel === "equal" || rel === "b") {
         await this.writeLocal(p, R);
