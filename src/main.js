@@ -753,7 +753,20 @@ export default class VaultSyncCollab extends Plugin {
       if (this.session !== session) return;
       session.attached = true;
       this._collabConnecting = false; try { clearTimeout(this._connectTimer); } catch (e) {}   // 붙었으니 편집 잠금 해제
-      const persist = () => { clearTimeout(session.saveTimer); session.saveTimer = setTimeout(async () => { try { const f = this.app.vault.getAbstractFileByPath(path); if (f) { this.applying = true; try { await this.app.vault.modify(f, ytext.toString()); } finally { this.applying = false; } } } catch (e) {} }, 700); };
+      // 열려 있는 노트를 파일로 다시 쓰면 옵시디언이 «에디터 문서를 그 내용으로」 갈아끼운다.
+      // 그때 파일 내용이 지금 에디터 문서와 조금이라도 다르면, 그 줄단위 되돌림이 y-codemirror 를 거쳐
+      // Y.Text 로 돌아와 본문이 어긋난다(2026-08-09 사고: 개행마다 7유닛씩 지워짐).
+      // → 에디터 문서가 Y.Text 와 «완전히 같을 때만» 쓴다. 그러면 갈아끼워도 내용이 안 바뀐다.
+      //   다르면 이번은 건너뛴다 — 치고 있는 중이라 Y.Text 가 곧 또 바뀌고 persist 가 다시 온다.
+      const persist = () => { clearTimeout(session.saveTimer); session.saveTimer = setTimeout(async () => { try {
+        if (this.session !== session) return;
+        const text = ytext.toString();
+        let cur = null; try { cur = session.cm.state.doc.toString(); } catch (e) {}
+        if (cur !== null && cur !== text) return;
+        if (text === session.lastWritten) return;   // 같은 내용을 또 쓰지 않는다(쓸 때마다 갈아끼움이 일어난다)
+        const f = this.app.vault.getAbstractFileByPath(path);
+        if (f) { this.applying = true; try { await this.app.vault.modify(f, text); session.lastWritten = text; } finally { this.applying = false; } }
+      } catch (e) {} }, 700); };
       session.persist = persist; ytext.observe(persist);
       try { cm.dispatch({ effects: this.compartment.reconfigure(yCollab(ytext, provider.awareness)) }); } catch (e) { console.error('[collab] attach', e); }
       this.setCollab('연결됨·' + this.peerCount()); this.refreshLock();

@@ -11687,11 +11687,21 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         clearTimeout(session.saveTimer);
         session.saveTimer = setTimeout(async () => {
           try {
+            if (this.session !== session) return;
+            const text2 = ytext.toString();
+            let cur = null;
+            try {
+              cur = session.cm.state.doc.toString();
+            } catch (e) {
+            }
+            if (cur !== null && cur !== text2) return;
+            if (text2 === session.lastWritten) return;
             const f = this.app.vault.getAbstractFileByPath(path);
             if (f) {
               this.applying = true;
               try {
-                await this.app.vault.modify(f, ytext.toString());
+                await this.app.vault.modify(f, text2);
+                session.lastWritten = text2;
               } finally {
                 this.applying = false;
               }
