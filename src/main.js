@@ -207,7 +207,17 @@ export default class VaultSyncCollab extends Plugin {
       const cur = await this.req('GET', this.docUrl(this.idFor(pNfc)));
       const server = (cur.status === 200 && cur.json) ? cur.json : null;
       const base = this.shadow.get(pNfc);
-      if (server && !server.deleted && server.content !== undefined && server.content !== content && base !== undefined && server.content !== base) {
+      if (server && !server.deleted && server.content !== undefined && server.content !== content && base === undefined) {
+        // 기준선이 없다 — 재시작 직후이거나, 뒤에서 도는 전체 확인(backgroundPull)이 아직 이 노트에 안 닿았다.
+        // 기준선 없이는 3-way 병합을 못 한다. 그런데 그냥 올리면 서버본이 사본도 없이 사라진다.
+        // 그래서 겹치지 않는 포함관계면 그걸로 정하고, 진짜 갈렸으면 서버본을 사본으로 남긴 뒤 올린다.
+        const rel = this._relate(content, server.content);
+        if (rel === 'b') { await this.writeLocal(pNfc, server.content); this.shadow.set(pNfc, server.content); return; }   // 서버가 상위집합 → 서버본
+        if (rel !== 'a') {   // 'a'(local 상위집합)면 아래 putDoc 로 올림. 그 외 진짜 분기만 사본.
+          await this.logConflict(pNfc, 'upsert-nobase', base, content, server.content, mtime, server.mtime || 0, server.lastEditor, server.clientVersion);
+          await this.saveConflictCopy(pNfc, server.content, server.mtime || Date.now(), 'server');
+        }
+      } else if (server && !server.deleted && server.content !== undefined && server.content !== content && base !== undefined && server.content !== base) {
         const merged = merge3(base, content, server.content);   // 3-way 병합 — 겹치지 않으면 사본 없이 합침
         if (merged !== null) { await this.writeLocal(pNfc, merged); this.shadow.set(pNfc, merged); await this.putDoc(pNfc, merged, Math.max(mtime, server.mtime || 0)); return; }
         const rel = this._relate(content, server.content);   // 병합 불가 → 사소한 포함관계면 상위집합
@@ -291,18 +301,42 @@ export default class VaultSyncCollab extends Plugin {
     } catch (e) { this.setSync('오류'); console.error('[sync] pullAll', e); return 0; }
     finally { this.syncing = false; }
   }
-  // 동기화 게이트: 처음/재접속 시 전체 동기화가 끝날 때까지 편집을 잠근다(모달+readonly).
-  //  밀린 변경이 대량으로 들어오는 도중 사용자가 편집해 노트가 깨지는 걸 막는다.
+  // 동기화 게이트: 처음/재접속 시 «지금 연 노트 하나»만 맞출 때까지 편집을 잠근다(모달+readonly).
+  //  나머지 노트는 같은 방식(pullAllFromServer)으로 뒤에서 돈다 — 편집을 막지 않는다.
+  //  왜 열린 노트만 먼저인가: 지금 고칠 수 있는 노트가 그것뿐이고(딴 노트는 열어야 고친다),
+  //  그 노트의 기준선(shadow)이 서면 upsert 의 3-way 병합이 선다. 나머지를 기다려 편집을 막을 이유가 없다.
   async gatedSync() {
     if (this._gating || !this.configured() || this.isOffline()) return;
-    await this.resetOnUpgrade();   // 업데이트 직후면 먼저 서버본으로 재기준(로컬 버림)
+    await this.resetOnUpgrade();   // 업데이트 직후면 먼저 서버본으로 재기준(로컬 버림) — 로컬을 지우므로 이건 끝까지 기다린다
     this._gating = true; this.refreshLock();
-    let modal = null, last = { done: 0, total: 0 };
-    const t = setTimeout(() => { try { modal = new SyncGateModal(this.app); modal.open(); modal.setProgress(last.done, last.total); } catch (e) {} }, 500);   // 오래 걸릴 때만 모달
-    const onProg = (done, total) => { last = { done, total }; if (modal) modal.setProgress(done, total); };
-    try { await this.pullAllFromServer(onProg); } catch (e) {}
+    let modal = null;
+    const t = setTimeout(() => { try { modal = new SyncGateModal(this.app); modal.open(); modal.setProgress(0, 1); } catch (e) {} }, 500);   // 오래 걸릴 때만 모달(보통 GET 한 번이라 안 뜬다)
+    try { await this.syncActiveNote(); } catch (e) {}
     clearTimeout(t); if (modal) { modal.allowClose = true; try { modal.close(); } catch (e) {} }   // 완료 시에만 자동 닫힘
     this._gating = false; this.refreshLock();
+    this.backgroundPull();   // 나머지 노트 전체 — await 하지 않는다(편집이 이미 풀렸다)
+  }
+  // 지금 연 노트 하나만 서버와 맞춘다. Yjs 세션이 붙기 전에 해야 한다 — 붙은 뒤엔 relay 가 그 노트의 주인이다.
+  //  (onload 는 gatedSync → onActiveChange 순서라 처음 기동 때는 아직 안 붙어 있다. 재접속 때는 붙어 있어 건너뛴다.)
+  async syncActiveNote() {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const file = view && view.file;
+    if (!file || !this.isMd(file) || this._ignored(file.path)) return;
+    const p = nfc(file.path);
+    if (p === this.collabPath) return;   // 이미 협업 세션이 붙었다(재접속) → relay 가 맞춘다
+    this.setSync('연 노트 확인…');
+    const cur = await this.req('GET', this.docUrl(this.idFor(p)));
+    if (cur.status === 200 && cur.json) await this.applyRemote(cur.json);
+  }
+  // 나머지 노트 전체 — 지금까지와 같은 방식(pullAllFromServer), 다만 편집을 막지 않고 뒤에서 돈다.
+  async backgroundPull() {
+    if (this._bgPull) return;                                 // 이미 도는 중이면 겹쳐 받지 않는다
+    if (Date.now() - (this._bgPullAt || 0) < 60000) return;    // 방금 끝났으면 건너뛴다(모바일에서 끊겼다 붙었다 할 때 전체를 거듭 받는 것 방지)
+    this._bgPull = true;
+    let shown = -1;
+    try { await this.pullAllFromServer((done, total) => { if (done - shown >= 25 || done >= total) { shown = done; this.setSync(`전체 확인 ${done}/${total}`); } }); }
+    catch (e) { console.error('[sync] backgroundPull', e); }
+    finally { this._bgPull = false; this._bgPullAt = Date.now(); }
   }
   async longPollLoop() {
     while (this._rtRunning) {
@@ -331,12 +365,14 @@ export default class VaultSyncCollab extends Plugin {
     const R = doc.content || '';
     try {
       const exists = await this.app.vault.adapter.exists(p);
+      if (nfc(p) === this.collabPath) return false;   // 확인하는 사이에 이 노트가 열렸다 → relay 가 주인, 손대지 않는다
       if (doc.deleted || doc._deleted) {
         if (exists) { this.applying = true; try { const af = this.app.vault.getAbstractFileByPath(p); if (af) await this.app.vault.trash(af, false); else await this.app.vault.adapter.remove(p); } finally { this.applying = false; } await this.pruneEmptyParents(p); }
         this.shadow.delete(p); return exists;
       }
       if (!exists) { await this.writeLocal(p, R); this.shadow.set(p, R); return true; }
       const local = await this.app.vault.adapter.read(p);
+      if (nfc(p) === this.collabPath) return false;   // 읽는 사이에 이 노트가 열렸다 → relay 가 주인(뒤에서 도는 전체 확인이 열린 노트를 덮는 것 방지)
       if (local === R) { this.shadow.set(p, R); return false; }
       const base = this.shadow.get(p);
       if (base === undefined) {
