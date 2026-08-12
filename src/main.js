@@ -637,14 +637,26 @@ export default class VaultSyncCollab extends Plugin {
       }
     } catch (e) { console.error('[lock] applyViewLock', e); }
   }
+  // ⭐ 한 기기가 둘로 보이던 것 막기(2026-08-12): 토큰을 기다리는 사이에 또 불리면
+  // provider 가 둘 생기고 앞의 것을 아무도 안 닫았다. 그 것은 15초마다 자기 상태를 갱신해 안 사라진다.
+  // → 붙는 중이면 그게 끝나길 기다리고(둘 만들지 않는다), 기다리는 사이 stopPresence 가 오면 이번 것은 버린다.
   async ensurePresence() {
-    if (this.presence || !this.settings.enabled || !this.settings.wsUrl) return;
-    const token = await this.getToken(); if (!token) return;
-    this._presenceDoc = new Y.Doc();
-    this.presence = new WebsocketProvider(this.settings.wsUrl, '__presence__', this._presenceDoc, { params: { token, v: this.manifest.version } });   // v: relay 가 옛 플러그인 차단(강제 업데이트)
-    this.presence.awareness.setLocalStateField('user', { name: `${this.settings.username}·${this.settings.deviceLabel}`, color: this.userColor, login: this.settings.username, device: this.settings.deviceLabel, deviceId: this.settings.deviceId });
-    this.updatePresencePath();
-    this.presence.awareness.on('change', () => this.onPresenceChange());
+    if (!this.settings.enabled || !this.settings.wsUrl) return;
+    while (this._presStarting) { try { await this._presStarting; } catch (e) {} }
+    if (this.presence) return;
+    const gen = this._presGen | 0;
+    const p = (async () => {
+      const token = await this.getToken(); if (!token) return;
+      if (this.presence || gen !== (this._presGen | 0)) return;   // 그 사이 stopPresence/재로그인 → 이번 것은 버린다
+      const doc = new Y.Doc();
+      const prov = new WebsocketProvider(this.settings.wsUrl, '__presence__', doc, { params: { token, v: this.manifest.version } });   // v: relay 가 옛 플러그인 차단(강제 업데이트)
+      this._presenceDoc = doc; this.presence = prov;
+      prov.awareness.setLocalStateField('user', { name: `${this.settings.username}·${this.settings.deviceLabel}`, color: this.userColor, login: this.settings.username, device: this.settings.deviceLabel, deviceId: this.settings.deviceId });
+      this.updatePresencePath();
+      prov.awareness.on('change', () => this.onPresenceChange());
+    })();
+    this._presStarting = p;
+    try { await p; } finally { if (this._presStarting === p) this._presStarting = null; }
   }
   myLabel() { return `${this.settings.username}·${this.settings.deviceLabel}`; }
   updatePresencePath() {
@@ -713,7 +725,7 @@ export default class VaultSyncCollab extends Plugin {
       session.cm.dispatch({ effects: EditorView.scrollIntoView(pos, { y: 'center' }) });
     } catch (e) {}
   }
-  stopPresence() { try { if (this.presence) this.presence.destroy(); } catch (e) {} try { if (this._presenceDoc) this._presenceDoc.destroy(); } catch (e) {} this.presence = null; this._presenceDoc = null; }
+  stopPresence() { this._presGen = (this._presGen | 0) + 1; try { if (this.presence) this.presence.destroy(); } catch (e) {} try { if (this._presenceDoc) this._presenceDoc.destroy(); } catch (e) {} this.presence = null; this._presenceDoc = null; }
   dupDeviceName() { if (!this.presence) return false; const my = `${this.settings.username}·${this.settings.deviceLabel}`; return [...this.presence.awareness.getStates().values()].map(s => s && s.user && s.user.name).filter(n => n === my).length > 1; }
   // 기기 이름 중복 확인: 내 계정(login)은 전부 제외하고, "다른 사용자"가 같은 기기 이름을 쓰는지만 본다.
   // 없으면 사용 가능 → 그 이름으로 재연결(적용).
@@ -770,7 +782,11 @@ export default class VaultSyncCollab extends Plugin {
     this.refreshLock();
   }
   async startSession(file, cm) {
+    // ⭐ 같은 기기가 한 방에 두 번 붙던 것 막기(2026-08-12): 토큰을 기다리는 사이 다른 노트로 옮기면
+    // (_startingPath 는 경로가 달라 안 막는다) provider 가 둘 남고 앞의 것을 아무도 안 닫았다.
+    const gen = this._sessGen = (this._sessGen | 0) + 1;
     const token = await this.getToken(); if (!token) { this.setCollab('로그인 필요'); this._collabConnecting = false; try { clearTimeout(this._connectTimer); } catch (e) {} this.refreshLock(); return; }
+    if (gen !== (this._sessGen | 0)) return;   // 그 사이 다른 노트로 옮겼다/세션을 닫았다 → 이번 것은 안 만든다
     const path = file.path; const ydoc = new Y.Doc();
     const room = 'note:' + b64url(path.normalize('NFC'));
     const provider = new WebsocketProvider(this.settings.wsUrl, room, ydoc, { params: { token, v: this.manifest.version } });   // v: relay 가 옛 플러그인 차단(강제 업데이트)
@@ -801,7 +817,10 @@ export default class VaultSyncCollab extends Plugin {
         if (cur !== null && cur !== text) return;
         if (text === session.lastWritten) return;   // 같은 내용을 또 쓰지 않는다(쓸 때마다 갈아끼움이 일어난다)
         const f = this.app.vault.getAbstractFileByPath(path);
-        if (f) { this.applying = true; try { await this.app.vault.modify(f, text); session.lastWritten = text; } finally { this.applying = false; } }
+        // ⭐ 기준선(shadow)도 같이 옮긴다. 안 옮기면 파일동기화가 «이 기기가 로컬에서 고쳤다»고 보고,
+        //    나중에 relay 가 저장한 cvs 가 오면 기준선 대비 «양쪽 다 바뀜」이 되어 3-way 병합이 돈다.
+        //    그 병합은 겹치지 않는 두 판본을 «둘 다» 남기므로 같은 줄이 두 번 들어간다(2026-08-12 사고).
+        if (f) { this.applying = true; try { await this.app.vault.modify(f, text); session.lastWritten = text; this.shadow.set(nfc(path), text); } finally { this.applying = false; } }
       } catch (e) {} }, 700); };
       session.persist = persist; ytext.observe(persist);
       try { cm.dispatch({ effects: this.compartment.reconfigure(yCollab(ytext, provider.awareness)) }); } catch (e) { console.error('[collab] attach', e); }
@@ -820,6 +839,7 @@ export default class VaultSyncCollab extends Plugin {
     session.meta = meta; session.onMeta = onMeta; meta.observe(onMeta); onMeta();
   }
   endSession() {
+    this._sessGen = (this._sessGen | 0) + 1;   // 붙는 중인 세션이 있으면 그건 버려진다(위 startSession 의 gen 확인)
     const s = this.session; if (!s) return; this.session = null; this.collabPath = null;
     this._collabConnecting = false; try { clearTimeout(this._connectTimer); } catch (e) {}
     try { s.cm.dispatch({ effects: this.compartment.reconfigure([]) }); } catch (e) {}

@@ -11455,15 +11455,37 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       console.error("[lock] applyViewLock", e);
     }
   }
+  // ⭐ 한 기기가 둘로 보이던 것 막기(2026-08-12): 토큰을 기다리는 사이에 또 불리면
+  // provider 가 둘 생기고 앞의 것을 아무도 안 닫았다. 그 것은 15초마다 자기 상태를 갱신해 안 사라진다.
+  // → 붙는 중이면 그게 끝나길 기다리고(둘 만들지 않는다), 기다리는 사이 stopPresence 가 오면 이번 것은 버린다.
   async ensurePresence() {
-    if (this.presence || !this.settings.enabled || !this.settings.wsUrl) return;
-    const token = await this.getToken();
-    if (!token) return;
-    this._presenceDoc = new Doc();
-    this.presence = new WebsocketProvider(this.settings.wsUrl, "__presence__", this._presenceDoc, { params: { token, v: this.manifest.version } });
-    this.presence.awareness.setLocalStateField("user", { name: `${this.settings.username}\xB7${this.settings.deviceLabel}`, color: this.userColor, login: this.settings.username, device: this.settings.deviceLabel, deviceId: this.settings.deviceId });
-    this.updatePresencePath();
-    this.presence.awareness.on("change", () => this.onPresenceChange());
+    if (!this.settings.enabled || !this.settings.wsUrl) return;
+    while (this._presStarting) {
+      try {
+        await this._presStarting;
+      } catch (e) {
+      }
+    }
+    if (this.presence) return;
+    const gen = this._presGen | 0;
+    const p = (async () => {
+      const token = await this.getToken();
+      if (!token) return;
+      if (this.presence || gen !== (this._presGen | 0)) return;
+      const doc2 = new Doc();
+      const prov = new WebsocketProvider(this.settings.wsUrl, "__presence__", doc2, { params: { token, v: this.manifest.version } });
+      this._presenceDoc = doc2;
+      this.presence = prov;
+      prov.awareness.setLocalStateField("user", { name: `${this.settings.username}\xB7${this.settings.deviceLabel}`, color: this.userColor, login: this.settings.username, device: this.settings.deviceLabel, deviceId: this.settings.deviceId });
+      this.updatePresencePath();
+      prov.awareness.on("change", () => this.onPresenceChange());
+    })();
+    this._presStarting = p;
+    try {
+      await p;
+    } finally {
+      if (this._presStarting === p) this._presStarting = null;
+    }
   }
   myLabel() {
     return `${this.settings.username}\xB7${this.settings.deviceLabel}`;
@@ -11561,6 +11583,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
   }
   stopPresence() {
+    this._presGen = (this._presGen | 0) + 1;
     try {
       if (this.presence) this.presence.destroy();
     } catch (e) {
@@ -11672,6 +11695,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     this.refreshLock();
   }
   async startSession(file, cm) {
+    const gen = this._sessGen = (this._sessGen | 0) + 1;
     const token = await this.getToken();
     if (!token) {
       this.setCollab("\uB85C\uADF8\uC778 \uD544\uC694");
@@ -11683,6 +11707,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       this.refreshLock();
       return;
     }
+    if (gen !== (this._sessGen | 0)) return;
     const path = file.path;
     const ydoc = new Doc();
     const room = "note:" + b64url(path.normalize("NFC"));
@@ -11746,6 +11771,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
               try {
                 await this.app.vault.modify(f, text2);
                 session.lastWritten = text2;
+                this.shadow.set(nfc(path), text2);
               } finally {
                 this.applying = false;
               }
@@ -11796,6 +11822,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     onMeta();
   }
   endSession() {
+    this._sessGen = (this._sessGen | 0) + 1;
     const s = this.session;
     if (!s) return;
     this.session = null;
