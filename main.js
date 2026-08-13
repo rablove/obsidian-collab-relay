@@ -10499,6 +10499,13 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     this._tokenExp = 0;
     this.collabPath = null;
     this.following = null;
+    this._modAdmin = false;
+    this._modReadonly = false;
+    this._modAll = null;
+    this._kickUntil = 0;
+    this._kickScope = null;
+    this._kickPath = null;
+    this.hiddenPeers = /* @__PURE__ */ new Set();
     this.registerEditorExtension([this.compartment.of([]), this.editLock.of([])]);
     this.addSettingTab(new SettingTab(this.app, this));
     this.syncEl = this.addStatusBarItem();
@@ -10539,8 +10546,10 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       this.registerDomEvent(window, "online", () => this.setNet(true));
       this.registerInterval(window.setInterval(() => this.refreshLock(), 3e3));
       this.registerInterval(window.setInterval(() => this.lockWatch(), 5e3));
+      this.registerInterval(window.setInterval(() => this.fetchMod(), 6e4));
       this.onActiveChange();
       this.ensurePresence();
+      this.fetchMod();
     });
   }
   onunload() {
@@ -11291,6 +11300,169 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
     return null;
   }
+  /* ── 관리(읽기모드·추방) ─────────────────────────────────────────────
+     관리자 계정만 남을 읽기모드로 바꾸거나 추방할 수 있다(누가 관리자인지는 relay 가 정한다 — /app/.admins).
+     읽기모드: 이 기기가 스스로 편집을 잠근다. 관리자가 풀 때까지 유지되고 재시작해도 유지된다(서버에 남는다).
+     추방:    relay 가 ws 를 끊고 일정 시간 재접속을 거부한다. 'room' 이면 그 노트만, 'all' 이면 협업 전체.
+     ⚠️ 둘 다 «실시간 협업 + 이 플러그인의 편집잠금」 범위다. 파일동기화(CouchDB 직접)까지 막지는 못한다. */
+  modKey(login, deviceId) {
+    return `${login || "?"}|${deviceId || "?"}`;
+  }
+  myModKey() {
+    return this.modKey(this.settings.username, this.settings.deviceId);
+  }
+  async modPost(path, body) {
+    const token = await this.getToken();
+    if (!token) return null;
+    try {
+      const res = await (0, import_obsidian.requestUrl)({ url: this.httpBase() + path, method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ token }, body || {})), throw: false });
+      return res.status === 200 && res.json ? res.json : null;
+    } catch (e) {
+      return null;
+    }
+  }
+  async fetchMod() {
+    if (!this.settings.enabled || !this.settings.wsUrl || this.isOffline()) return null;
+    const r = await this.modPost("/admin/state", {});
+    if (!r || !r.ok) return null;
+    this._modAdmin = !!r.admin;
+    this.applyMod({ readonly: r.readonly || [], bans: r.bans || {} });
+    return r;
+  }
+  applyMod(m) {
+    if (!m) return;
+    this._modAll = m;
+    const ro = (m.readonly || []).indexOf(this.myModKey()) >= 0;
+    if (ro !== !!this._modReadonly) {
+      this._modReadonly = ro;
+      this.refreshLock();
+      if (ro) {
+        new import_obsidian.Notice("\u{1F4D6} \uAD00\uB9AC\uC790\uAC00 \uC774 \uAE30\uAE30\uB97C \uC77D\uAE30\uBAA8\uB4DC\uB85C \uBC14\uAFE8\uC2B5\uB2C8\uB2E4", 6e3);
+        try {
+          new AlertModal(this.app, "\u{1F4D6} \uC77D\uAE30\uBAA8\uB4DC", "\uAD00\uB9AC\uC790\uAC00 \uC774 \uAE30\uAE30\uB97C \uC77D\uAE30\uBAA8\uB4DC\uB85C \uBC14\uAFE8\uC2B5\uB2C8\uB2E4. \uAD00\uB9AC\uC790\uAC00 \uD480\uAE30 \uC804\uAE4C\uC9C0 \uD3B8\uC9D1\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uC77D\uAE30\uC640 \uB3D9\uAE30\uD654\uB294 \uADF8\uB300\uB85C \uB429\uB2C8\uB2E4.").open();
+        } catch (e) {
+        }
+      } else new import_obsidian.Notice("\u270F\uFE0F \uC77D\uAE30\uBAA8\uB4DC\uAC00 \uD480\uB838\uC2B5\uB2C8\uB2E4 \u2014 \uD3B8\uC9D1\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4", 5e3);
+    }
+    if (!(m.bans || {})[this.myModKey()] && this._kickUntil) this.clearKick();
+  }
+  // ── 관리자가 누르는 것 (relay 가 관리자인지 다시 확인한다 — 여기 통과해도 서버에서 막힌다)
+  async adminReadonly(u, on) {
+    const r = await this.modPost("/admin/readonly", { login: u.login, deviceId: u.deviceId, label: u.name, on: !!on });
+    if (!r || !r.ok) {
+      new import_obsidian.Notice("\u274C \uC77D\uAE30\uBAA8\uB4DC \uC124\uC815 \uC2E4\uD328 (\uAD8C\uD55C\xB7\uC5F0\uACB0 \uD655\uC778)", 5e3);
+      return false;
+    }
+    new import_obsidian.Notice(on ? `\u{1F4D6} ${u.name} \uC77D\uAE30\uBAA8\uB4DC` : `\u270F\uFE0F ${u.name} \uC77D\uAE30\uBAA8\uB4DC \uD574\uC81C`, 4e3);
+    await this.fetchMod();
+    return true;
+  }
+  async adminKick(u, scope, path) {
+    const r = await this.modPost("/admin/kick", { login: u.login, deviceId: u.deviceId, label: u.name, scope, path });
+    if (!r || !r.ok) {
+      new import_obsidian.Notice("\u274C \uCD94\uBC29 \uC2E4\uD328 (\uAD8C\uD55C\xB7\uC5F0\uACB0 \uD655\uC778)", 5e3);
+      return false;
+    }
+    new import_obsidian.Notice(scope === "room" ? `\u{1F6AA} ${u.name} \u2014 \uC774 \uB178\uD2B8\uC5D0\uC11C \uB0B4\uBCF4\uB0C4` : `\u{1F6AB} ${u.name} \u2014 \uD611\uC5C5 \uC5F0\uACB0 \uCC28\uB2E8`, 5e3);
+    await this.fetchMod();
+    return true;
+  }
+  async adminUnkick(u) {
+    const r = await this.modPost("/admin/unkick", { login: u.login, deviceId: u.deviceId, label: u.name });
+    if (!r || !r.ok) {
+      new import_obsidian.Notice("\u274C \uCD94\uBC29 \uD574\uC81C \uC2E4\uD328", 5e3);
+      return false;
+    }
+    new import_obsidian.Notice(`\u2705 ${u.name} \uCD94\uBC29 \uD574\uC81C`, 4e3);
+    await this.fetchMod();
+    return true;
+  }
+  onKicked(reason, path) {
+    const p = String(reason || "").split(" ");
+    const left = Math.min(3600, Math.max(5, parseInt(p[1], 10) || 600));
+    const scope = p[2] === "room" ? "room" : "all";
+    this._kickUntil = Date.now() + left * 1e3;
+    this._kickScope = scope;
+    this._kickPath = path ? nfc(path) : null;
+    this.endSession();
+    if (scope === "all") this.stopPresence();
+    try {
+      clearTimeout(this._kickTimer);
+    } catch (e) {
+    }
+    this._kickTimer = setTimeout(() => this.clearKick(), left * 1e3 + 500);
+    const mins = Math.ceil(left / 60);
+    if (!this._kickShown) {
+      this._kickShown = true;
+      try {
+        new AlertModal(this.app, "\u{1F6AB} \uACF5\uB3D9\uD3B8\uC9D1\uC5D0\uC11C \uB0B4\uBCF4\uB0B4\uC84C\uC2B5\uB2C8\uB2E4", scope === "room" ? `\uAD00\uB9AC\uC790\uAC00 \uC774 \uB178\uD2B8\uC758 \uACF5\uB3D9\uD3B8\uC9D1\uC5D0\uC11C \uB0B4\uBCF4\uB0C8\uC2B5\uB2C8\uB2E4. \uC57D ${mins}\uBD84 \uB4A4 \uC790\uB3D9\uC73C\uB85C \uB2E4\uC2DC \uC5F0\uACB0\uB418\uACE0, \uADF8\uB3D9\uC548 \uC774 \uB178\uD2B8\uB294 \uD3B8\uC9D1\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uB2E4\uB978 \uB178\uD2B8\uB294 \uADF8\uB300\uB85C \uC501\uB2C8\uB2E4.` : `\uAD00\uB9AC\uC790\uAC00 \uACF5\uB3D9\uD3B8\uC9D1 \uC5F0\uACB0\uC744 \uB04A\uC5C8\uC2B5\uB2C8\uB2E4. \uC57D ${mins}\uBD84 \uB4A4 \uC790\uB3D9\uC73C\uB85C \uB2E4\uC2DC \uC5F0\uACB0\uB418\uACE0, \uADF8\uB3D9\uC548 \uD3B8\uC9D1\uC774 \uC7A0\uAE41\uB2C8\uB2E4.`).open();
+      } catch (e) {
+      }
+    }
+    this.refreshLock();
+  }
+  clearKick() {
+    if (!this._kickUntil) return;
+    this._kickUntil = 0;
+    this._kickScope = null;
+    this._kickPath = null;
+    this._kickShown = false;
+    try {
+      clearTimeout(this._kickTimer);
+    } catch (e) {
+    }
+    new import_obsidian.Notice("\u2705 \uACF5\uB3D9\uD3B8\uC9D1\uC5D0 \uB2E4\uC2DC \uC5F0\uACB0\uD569\uB2C8\uB2E4", 4e3);
+    this.refreshLock();
+    this.ensurePresence();
+    this.onActiveChange();
+  }
+  kickActive() {
+    if (!this._kickUntil || Date.now() >= this._kickUntil) return false;
+    if (this._kickScope === "all") return true;
+    const v = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+    return !!(v && v.file && nfc(v.file.path) === this._kickPath);
+  }
+  // ── 커서 안 보이기 — 이 기기 화면에서만 숨긴다(상대 편집은 그대로 되고, 다른 사람 화면에도 그대로 보인다).
+  //    y-codemirror 는 awareness.getStates() 로 남의 커서를 그린다 → 그 목록에서만 빼면 된다.
+  awarenessFilter(aw) {
+    const plugin = this;
+    try {
+      return new Proxy(aw, { get(t, prop) {
+        if (prop === "getStates") return () => {
+          const m = t.getStates();
+          if (!plugin.hiddenPeers || !plugin.hiddenPeers.size) return m;
+          const out = /* @__PURE__ */ new Map();
+          for (const [id2, st] of m) {
+            const n = st && st.user && st.user.name;
+            if (n && plugin.hiddenPeers.has(n)) continue;
+            out.set(id2, st);
+          }
+          return out;
+        };
+        const v = Reflect.get(t, prop, t);
+        return typeof v === "function" ? v.bind(t) : v;
+      } });
+    } catch (e) {
+      return aw;
+    }
+  }
+  toggleHidePeer(name) {
+    if (!this.hiddenPeers) this.hiddenPeers = /* @__PURE__ */ new Set();
+    if (this.hiddenPeers.has(name)) this.hiddenPeers.delete(name);
+    else this.hiddenPeers.add(name);
+    this.redrawPeer(name);
+    return this.hiddenPeers.has(name);
+  }
+  redrawPeer(name) {
+    try {
+      const aw = this.session && this.session.provider && this.session.provider.awareness;
+      if (!aw) return;
+      const ids = [];
+      for (const [id2, st] of aw.getStates()) if (st && st.user && st.user.name === name) ids.push(id2);
+      if (ids.length) aw.emit("change", [{ added: [], updated: ids, removed: [] }, "local"]);
+    } catch (e) {
+    }
+  }
   // 연결 인원 = presence(전체 접속자, 모달 목록과 같은 소스). 노트방 awareness 는 유령/재접속 중복이 껴서 부풀려짐.
   peerCount() {
     try {
@@ -11379,7 +11551,8 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
   }
   refreshLock() {
-    const lock = this.settings.enabled && (this.isOffline() || this._resetting || this._gating || this._collabConnecting || this._outdated || this._dupName || this._harnessLock);
+    const kicked = this.kickActive();
+    const lock = this.settings.enabled && (this.isOffline() || this._resetting || this._gating || this._collabConnecting || this._outdated || this._dupName || this._harnessLock || this._modReadonly || kicked);
     if (import_obsidian.Platform.isMobile) this.applyViewLock(lock);
     const view = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
     const cm = view && view.editor && view.editor.cm;
@@ -11397,7 +11570,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         }
       }
     }
-    if (lock) this.setCollab(this._resetting ? "\u267B\uFE0F \uC11C\uBC84\uBCF8\uC73C\uB85C \uB2E4\uC2DC \uBC1B\uB294 \uC911\u2026 \uD3B8\uC9D1 \uC7A0\uAE08" : this._dupName ? "\u{1F534} \uAE30\uAE30 \uC774\uB984 \xAB" + this.settings.deviceLabel + "\xBB \uC911\uBCF5 \u2014 \uC774\uB984 \uBC14\uAFD4\uC57C \uD3B8\uC9D1\xB7\uB3D9\uAE30\uD654" : this._outdated ? "\u{1F53A} \uC5C5\uB370\uC774\uD2B8 \uD544\uC694 \u2192 " + (this._latestVer || "") + " \xB7 \uD3B8\uC9D1\uC7A0\uAE08" : this._harnessLock ? "\u{1F916} \uD558\uB124\uC2A4\uAC00 \uC815\uB9AC\uD558\uB294 \uC911\u2026 \uC7A0\uC2DC \uD3B8\uC9D1 \uC7A0\uAE08" : this._collabConnecting && !this.isOffline() && !this._gating ? "\u{1F504} \uB178\uD2B8 \uB3D9\uAE30\uD654 \uC911\u2026 \uD3B8\uC9D1 \uC7A0\uAE08" : "\u{1F512} \uC624\uD504\uB77C\uC778\xB7\uD3B8\uC9D1\uC7A0\uAE08");
+    if (lock) this.setCollab(this._resetting ? "\u267B\uFE0F \uC11C\uBC84\uBCF8\uC73C\uB85C \uB2E4\uC2DC \uBC1B\uB294 \uC911\u2026 \uD3B8\uC9D1 \uC7A0\uAE08" : this._modReadonly ? "\u{1F4D6} \uAD00\uB9AC\uC790\uAC00 \uC77D\uAE30\uBAA8\uB4DC\uB85C \uC124\uC815 \u2014 \uD3B8\uC9D1 \uC7A0\uAE08" : kicked ? "\u{1F6AB} \uAD00\uB9AC\uC790\uAC00 \uB0B4\uBCF4\uB0C4 \u2014 " + Math.max(1, Math.ceil((this._kickUntil - Date.now()) / 6e4)) + "\uBD84 \uB0A8\uC74C" : this._dupName ? "\u{1F534} \uAE30\uAE30 \uC774\uB984 \xAB" + this.settings.deviceLabel + "\xBB \uC911\uBCF5 \u2014 \uC774\uB984 \uBC14\uAFD4\uC57C \uD3B8\uC9D1\xB7\uB3D9\uAE30\uD654" : this._outdated ? "\u{1F53A} \uC5C5\uB370\uC774\uD2B8 \uD544\uC694 \u2192 " + (this._latestVer || "") + " \xB7 \uD3B8\uC9D1\uC7A0\uAE08" : this._harnessLock ? "\u{1F916} \uD558\uB124\uC2A4\uAC00 \uC815\uB9AC\uD558\uB294 \uC911\u2026 \uC7A0\uC2DC \uD3B8\uC9D1 \uC7A0\uAE08" : this._collabConnecting && !this.isOffline() && !this._gating ? "\u{1F504} \uB178\uD2B8 \uB3D9\uAE30\uD654 \uC911\u2026 \uD3B8\uC9D1 \uC7A0\uAE08" : "\u{1F512} \uC624\uD504\uB77C\uC778\xB7\uD3B8\uC9D1\uC7A0\uAE08");
     else if (this._lastLock) this.setCollab(this.session && this.session.provider && this.session.provider.wsconnected ? "\uC5F0\uACB0\uB428\xB7" + this.peerCount() : "\uC5F0\uACB0 \uC548\uB428");
     this._lastLock = lock;
     this.updateDisconnectModal();
@@ -11472,13 +11645,24 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       const token = await this.getToken();
       if (!token) return;
       if (this.presence || gen !== (this._presGen | 0)) return;
+      if (this._kickUntil && this._kickScope === "all" && Date.now() < this._kickUntil) return;
       const doc2 = new Doc();
-      const prov = new WebsocketProvider(this.settings.wsUrl, "__presence__", doc2, { params: { token, v: this.manifest.version } });
+      const prov = new WebsocketProvider(this.settings.wsUrl, "__presence__", doc2, { params: { token, v: this.manifest.version, d: this.settings.deviceId } });
       this._presenceDoc = doc2;
       this.presence = prov;
       prov.awareness.setLocalStateField("user", { name: `${this.settings.username}\xB7${this.settings.deviceLabel}`, color: this.userColor, login: this.settings.username, device: this.settings.deviceLabel, deviceId: this.settings.deviceId });
       this.updatePresencePath();
       prov.awareness.on("change", () => this.onPresenceChange());
+      const pmeta = doc2.getMap("meta");
+      pmeta.observe(() => {
+        try {
+          this.applyMod(pmeta.get("mod"));
+        } catch (e) {
+        }
+      });
+      prov.on("connection-close", (e) => {
+        if (e && e.code === 4403) this.onKicked(e.reason, null);
+      });
     })();
     this._presStarting = p;
     try {
@@ -11665,6 +11849,12 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     const view = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
     const file = view && view.file;
     const path = file ? file.path : null;
+    if (this._kickUntil && Date.now() < this._kickUntil && (this._kickScope === "all" || path && nfc(path) === this._kickPath)) {
+      this.endSession();
+      this._startingPath = null;
+      this.refreshLock();
+      return;
+    }
     if (this.session && this.session.path === path) return;
     if (this._startingPath === path) return;
     this._startingPath = path;
@@ -11711,7 +11901,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     const path = file.path;
     const ydoc = new Doc();
     const room = "note:" + b64url(path.normalize("NFC"));
-    const provider = new WebsocketProvider(this.settings.wsUrl, room, ydoc, { params: { token, v: this.manifest.version } });
+    const provider = new WebsocketProvider(this.settings.wsUrl, room, ydoc, { params: { token, v: this.manifest.version, d: this.settings.deviceId } });
     const ytext = ydoc.getText("content");
     const meta = ydoc.getMap("meta");
     const label = `${this.settings.username}\xB7${this.settings.deviceLabel}`;
@@ -11731,7 +11921,8 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         this.followScroll(session);
       }
     });
-    provider.on("connection-close", async () => {
+    provider.on("connection-close", async (e) => {
+      if (e && e.code === 4403) return this.onKicked(e.reason, path);
       this._token = null;
       if (this.session === session) this.refreshLock();
     });
@@ -11783,7 +11974,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       session.persist = persist;
       ytext.observe(persist);
       try {
-        cm.dispatch({ effects: this.compartment.reconfigure(yCollab(ytext, provider.awareness)) });
+        cm.dispatch({ effects: this.compartment.reconfigure(yCollab(ytext, this.awarenessFilter(provider.awareness))) });
       } catch (e) {
         console.error("[collab] attach", e);
       }
@@ -12306,31 +12497,76 @@ var ParticipantModal = class extends import_obsidian.Modal {
         ul.createEl("li", { text: "(\uC5C6\uC74C)" });
         return;
       }
+      const admin = !!this.plugin._modAdmin;
+      const mod = this.plugin._modAll || { readonly: [], bans: {} };
       for (const st of states) {
         const u = st.user;
         const name = u.name;
         const mine = name === myLabel;
         const li = ul.createEl("li");
         li.style.display = "flex";
+        li.style.flexWrap = "wrap";
         li.style.alignItems = "center";
-        li.style.gap = "8px";
+        li.style.gap = "6px";
         li.style.padding = "5px 0";
         const dot = li.createSpan({ text: "\u25CF" });
         dot.style.color = u.color || "var(--text-muted)";
         const info = li.createDiv();
         info.style.flex = "1";
-        info.createDiv({ text: name + (mine ? " (\uB098)" : "") });
+        info.style.minWidth = "45%";
+        const key = this.plugin.modKey(u.login, u.deviceId);
+        const ro = (mod.readonly || []).indexOf(key) >= 0;
+        const ban = (mod.bans || {})[key];
+        const banLeft = ban && ban.until > Date.now() ? Math.max(1, Math.ceil((ban.until - Date.now()) / 6e4)) : 0;
+        const hidden = this.plugin.hiddenPeers && this.plugin.hiddenPeers.has(name);
+        info.createDiv({ text: name + (mine ? " (\uB098)" : "") + (ro ? " \u{1F4D6}" : "") + (banLeft ? " \u{1F6AB}" : "") + (hidden ? " \u{1F648}" : "") });
         const where = st.path ? st.path.split("/").pop() : "(\uB178\uD2B8 \uC5C6\uC74C)";
-        const sub = info.createDiv({ text: "\u{1F4C4} " + where });
+        const sub = info.createDiv({ text: "\u{1F4C4} " + where + (ro ? " \xB7 \uC77D\uAE30\uBAA8\uB4DC" : "") + (banLeft ? ` \xB7 \uCD94\uBC29 ${banLeft}\uBD84 \uB0A8\uC74C` : "") });
         sub.style.fontSize = "0.8em";
         sub.style.color = "var(--text-muted)";
-        if (!mine) {
-          const following = this.plugin.following === name;
-          const btn = li.createEl("button", { text: following ? "\uB530\uB77C\uAC00\uAE30 \uD574\uC81C" : "\uB530\uB77C\uAC00\uAE30" });
-          if (following) btn.classList.add("mod-cta");
-          btn.onclick = async () => {
-            if (this.plugin.following === name) this.plugin.unfollow();
-            else await this.plugin.followUser(name);
+        if (mine) continue;
+        const following = this.plugin.following === name;
+        const btn = li.createEl("button", { text: following ? "\uB530\uB77C\uAC00\uAE30 \uD574\uC81C" : "\uB530\uB77C\uAC00\uAE30" });
+        if (following) btn.classList.add("mod-cta");
+        btn.onclick = async () => {
+          if (this.plugin.following === name) this.plugin.unfollow();
+          else await this.plugin.followUser(name);
+          render();
+        };
+        if (!admin) continue;
+        const eye = li.createEl("button", { text: hidden ? "\uCEE4\uC11C \uBCF4\uC774\uAE30" : "\uCEE4\uC11C \uC228\uAE30\uAE30" });
+        eye.onclick = () => {
+          this.plugin.toggleHidePeer(name);
+          render();
+        };
+        const rob = li.createEl("button", { text: ro ? "\uC77D\uAE30\uBAA8\uB4DC \uD574\uC81C" : "\uC77D\uAE30\uBAA8\uB4DC" });
+        if (ro) rob.classList.add("mod-cta");
+        rob.onclick = async () => {
+          rob.disabled = true;
+          await this.plugin.adminReadonly(u, !ro);
+          render();
+        };
+        if (banLeft) {
+          const un = li.createEl("button", { text: "\uCD94\uBC29 \uD574\uC81C" });
+          un.classList.add("mod-cta");
+          un.onclick = async () => {
+            un.disabled = true;
+            await this.plugin.adminUnkick(u);
+            render();
+          };
+        } else {
+          const kr = li.createEl("button", { text: "\uC774 \uB178\uD2B8\uC5D0\uC11C \uCD94\uBC29" });
+          kr.disabled = !st.path;
+          kr.onclick = async () => {
+            kr.disabled = true;
+            await this.plugin.adminKick(u, "room", st.path);
+            render();
+          };
+          const ka = li.createEl("button", { text: "\uC5F0\uACB0 \uCC28\uB2E8" });
+          ka.classList.add("mod-warning");
+          ka.onclick = async () => {
+            ka.disabled = true;
+            await this.plugin.adminKick(u, "all", null);
             render();
           };
         }
@@ -12339,6 +12575,7 @@ var ParticipantModal = class extends import_obsidian.Modal {
     render();
     this._h = () => render();
     pres.awareness.on("change", this._h);
+    this.plugin.fetchMod().then(() => render());
   }
   onClose() {
     try {

@@ -92,6 +92,9 @@ export default class VaultSyncCollab extends Plugin {
     // 협업 상태
     this.compartment = new Compartment(); this.editLock = new Compartment();
     this.session = null; this._token = null; this._tokenExp = 0; this.collabPath = null; this.following = null;
+    // 관리(읽기모드·추방) — relay 가 정본. hiddenPeers 는 이 기기에서만 쓰는 «커서 안 보이기»(남에겐 영향 없음).
+    this._modAdmin = false; this._modReadonly = false; this._modAll = null;
+    this._kickUntil = 0; this._kickScope = null; this._kickPath = null; this.hiddenPeers = new Set();
 
     this.registerEditorExtension([this.compartment.of([]), this.editLock.of([])]);
     this.addSettingTab(new SettingTab(this.app, this));
@@ -129,7 +132,9 @@ export default class VaultSyncCollab extends Plugin {
       this.registerInterval(window.setInterval(() => this.refreshLock(), 3000));
       // 모바일(navigator.onLine 안 믿김) 대비: 잠금 켜져 있으면 서버 핑으로 오프라인 감지
       this.registerInterval(window.setInterval(() => this.lockWatch(), 5000));
-      this.onActiveChange(); this.ensurePresence();
+      // 관리 상태(읽기모드·추방)는 relay 가 presence 방 meta 로 즉시 밀어 준다. 이 주기 확인은 그걸 놓쳤을 때의 안전망.
+      this.registerInterval(window.setInterval(() => this.fetchMod(), 60000));
+      this.onActiveChange(); this.ensurePresence(); this.fetchMod();
     });
   }
   onunload() { this._rtRunning = false; try { this.applyViewLock(false); } catch (e) {} try { if (this._discModal) { this._discModal._auto = true; this._discModal.close(); } } catch (e) {} try { if (this._collabStyle) this._collabStyle.remove(); } catch (e) {} this.endSession(); this.stopPresence(); }
@@ -532,6 +537,122 @@ export default class VaultSyncCollab extends Plugin {
     } catch (e) { console.error('[collab] auth', e); }
     return null;
   }
+  /* ── 관리(읽기모드·추방) ─────────────────────────────────────────────
+     관리자 계정만 남을 읽기모드로 바꾸거나 추방할 수 있다(누가 관리자인지는 relay 가 정한다 — /app/.admins).
+     읽기모드: 이 기기가 스스로 편집을 잠근다. 관리자가 풀 때까지 유지되고 재시작해도 유지된다(서버에 남는다).
+     추방:    relay 가 ws 를 끊고 일정 시간 재접속을 거부한다. 'room' 이면 그 노트만, 'all' 이면 협업 전체.
+     ⚠️ 둘 다 «실시간 협업 + 이 플러그인의 편집잠금」 범위다. 파일동기화(CouchDB 직접)까지 막지는 못한다. */
+  modKey(login, deviceId) { return `${login || '?'}|${deviceId || '?'}`; }
+  myModKey() { return this.modKey(this.settings.username, this.settings.deviceId); }
+  async modPost(path, body) {
+    const token = await this.getToken(); if (!token) return null;
+    try {
+      const res = await requestUrl({ url: this.httpBase() + path, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({ token }, body || {})), throw: false });
+      return (res.status === 200 && res.json) ? res.json : null;
+    } catch (e) { return null; }
+  }
+  async fetchMod() {   // 내가 관리자인가 + 내가 지금 잠겨/추방돼 있나 (누구나 부를 수 있다)
+    if (!this.settings.enabled || !this.settings.wsUrl || this.isOffline()) return null;
+    const r = await this.modPost('/admin/state', {});
+    if (!r || !r.ok) return null;
+    this._modAdmin = !!r.admin;
+    this.applyMod({ readonly: r.readonly || [], bans: r.bans || {} });
+    return r;
+  }
+  applyMod(m) {   // presence meta 로 즉시 오거나(관리자가 방금 눌렀다) fetchMod 로 온다(붙을 때·1분마다)
+    if (!m) return;
+    this._modAll = m;
+    const ro = (m.readonly || []).indexOf(this.myModKey()) >= 0;
+    if (ro !== !!this._modReadonly) {
+      this._modReadonly = ro;
+      this.refreshLock();
+      if (ro) { new Notice('📖 관리자가 이 기기를 읽기모드로 바꿨습니다', 6000); try { new AlertModal(this.app, '📖 읽기모드', '관리자가 이 기기를 읽기모드로 바꿨습니다. 관리자가 풀기 전까지 편집할 수 없습니다. 읽기와 동기화는 그대로 됩니다.').open(); } catch (e) {} }
+      else new Notice('✏️ 읽기모드가 풀렸습니다 — 편집할 수 있습니다', 5000);
+    }
+    if (!((m.bans || {})[this.myModKey()]) && this._kickUntil) this.clearKick();   // 관리자가 추방을 일찍 풀었다
+  }
+  // ── 관리자가 누르는 것 (relay 가 관리자인지 다시 확인한다 — 여기 통과해도 서버에서 막힌다)
+  async adminReadonly(u, on) {
+    const r = await this.modPost('/admin/readonly', { login: u.login, deviceId: u.deviceId, label: u.name, on: !!on });
+    if (!r || !r.ok) { new Notice('❌ 읽기모드 설정 실패 (권한·연결 확인)', 5000); return false; }
+    new Notice(on ? `📖 ${u.name} 읽기모드` : `✏️ ${u.name} 읽기모드 해제`, 4000);
+    await this.fetchMod(); return true;
+  }
+  async adminKick(u, scope, path) {
+    const r = await this.modPost('/admin/kick', { login: u.login, deviceId: u.deviceId, label: u.name, scope, path });
+    if (!r || !r.ok) { new Notice('❌ 추방 실패 (권한·연결 확인)', 5000); return false; }
+    new Notice(scope === 'room' ? `🚪 ${u.name} — 이 노트에서 내보냄` : `🚫 ${u.name} — 협업 연결 차단`, 5000);
+    await this.fetchMod(); return true;
+  }
+  async adminUnkick(u) {
+    const r = await this.modPost('/admin/unkick', { login: u.login, deviceId: u.deviceId, label: u.name });
+    if (!r || !r.ok) { new Notice('❌ 추방 해제 실패', 5000); return false; }
+    new Notice(`✅ ${u.name} 추방 해제`, 4000);
+    await this.fetchMod(); return true;
+  }
+  onKicked(reason, path) {   // relay 가 4403 으로 끊었다 — reason = 'kicked <남은초> <scope>'
+    const p = String(reason || '').split(' ');
+    const left = Math.min(3600, Math.max(5, parseInt(p[1], 10) || 600));
+    const scope = (p[2] === 'room') ? 'room' : 'all';
+    this._kickUntil = Date.now() + left * 1000; this._kickScope = scope; this._kickPath = path ? nfc(path) : null;
+    this.endSession();
+    if (scope === 'all') this.stopPresence();
+    try { clearTimeout(this._kickTimer); } catch (e) {}
+    this._kickTimer = setTimeout(() => this.clearKick(), left * 1000 + 500);
+    const mins = Math.ceil(left / 60);
+    if (!this._kickShown) {
+      this._kickShown = true;
+      try { new AlertModal(this.app, '🚫 공동편집에서 내보내졌습니다', scope === 'room'
+        ? `관리자가 이 노트의 공동편집에서 내보냈습니다. 약 ${mins}분 뒤 자동으로 다시 연결되고, 그동안 이 노트는 편집할 수 없습니다. 다른 노트는 그대로 씁니다.`
+        : `관리자가 공동편집 연결을 끊었습니다. 약 ${mins}분 뒤 자동으로 다시 연결되고, 그동안 편집이 잠깁니다.`).open(); } catch (e) {}
+    }
+    this.refreshLock();
+  }
+  clearKick() {
+    if (!this._kickUntil) return;
+    this._kickUntil = 0; this._kickScope = null; this._kickPath = null; this._kickShown = false;
+    try { clearTimeout(this._kickTimer); } catch (e) {}
+    new Notice('✅ 공동편집에 다시 연결합니다', 4000);
+    this.refreshLock(); this.ensurePresence(); this.onActiveChange();
+  }
+  kickActive() {   // 지금 이 화면이 추방으로 잠기나
+    if (!this._kickUntil || Date.now() >= this._kickUntil) return false;
+    if (this._kickScope === 'all') return true;
+    const v = this.app.workspace.getActiveViewOfType(MarkdownView);
+    return !!(v && v.file && nfc(v.file.path) === this._kickPath);
+  }
+  // ── 커서 안 보이기 — 이 기기 화면에서만 숨긴다(상대 편집은 그대로 되고, 다른 사람 화면에도 그대로 보인다).
+  //    y-codemirror 는 awareness.getStates() 로 남의 커서를 그린다 → 그 목록에서만 빼면 된다.
+  awarenessFilter(aw) {
+    const plugin = this;
+    try {
+      return new Proxy(aw, { get(t, prop) {
+        if (prop === 'getStates') return () => {
+          const m = t.getStates();
+          if (!plugin.hiddenPeers || !plugin.hiddenPeers.size) return m;
+          const out = new Map();
+          for (const [id, st] of m) { const n = st && st.user && st.user.name; if (n && plugin.hiddenPeers.has(n)) continue; out.set(id, st); }
+          return out;
+        };
+        const v = Reflect.get(t, prop, t);
+        return (typeof v === 'function') ? v.bind(t) : v;
+      } });
+    } catch (e) { return aw; }
+  }
+  toggleHidePeer(name) {
+    if (!this.hiddenPeers) this.hiddenPeers = new Set();
+    if (this.hiddenPeers.has(name)) this.hiddenPeers.delete(name); else this.hiddenPeers.add(name);
+    this.redrawPeer(name);
+    return this.hiddenPeers.has(name);
+  }
+  redrawPeer(name) {   // 커서는 awareness 가 바뀔 때만 다시 그려진다 → 그 사람 clientID 로 변경 알림을 한 번 낸다
+    try {
+      const aw = this.session && this.session.provider && this.session.provider.awareness; if (!aw) return;
+      const ids = [];
+      for (const [id, st] of aw.getStates()) if (st && st.user && st.user.name === name) ids.push(id);
+      if (ids.length) aw.emit('change', [{ added: [], updated: ids, removed: [] }, 'local']);
+    } catch (e) {}
+  }
   // 연결 인원 = presence(전체 접속자, 모달 목록과 같은 소스). 노트방 awareness 는 유령/재접속 중복이 껴서 부풀려짐.
   peerCount() { try { return [...this.presence.awareness.getStates().values()].filter(s => s && s.user && s.user.name).length; } catch (e) { return 0; } }
   peerNames() { try { return [...this.presence.awareness.getStates().values()].map(s => (s.user && s.user.name) || '?'); } catch (e) { return []; } }
@@ -591,7 +712,8 @@ export default class VaultSyncCollab extends Plugin {
     } catch (e) {}
   }
   refreshLock() {
-    const lock = this.settings.enabled && (this.isOffline() || this._resetting || this._gating || this._collabConnecting || this._outdated || this._dupName || this._harnessLock);   // 오프라인·재기준중·초기동기화·협업연결중·구버전·기기이름중복·하네스정리중이면 편집 잠금
+    const kicked = this.kickActive();
+    const lock = this.settings.enabled && (this.isOffline() || this._resetting || this._gating || this._collabConnecting || this._outdated || this._dupName || this._harnessLock || this._modReadonly || kicked);   // 오프라인·재기준중·초기동기화·협업연결중·구버전·기기이름중복·하네스정리중·관리자읽기모드·추방중이면 편집 잠금
     // 모바일: CM readOnly 가 iOS 웹뷰에선 입력을 못 막는다. 그래서 노트를 «읽기 모드」로 강제 전환한다
     //  → 읽기 모드는 편집기가 아니라 렌더링 뷰라 어떤 플랫폼에서도 편집이 불가능하다. (cm 핸들 불필요)
     if (Platform.isMobile) this.applyViewLock(lock);
@@ -601,7 +723,7 @@ export default class VaultSyncCollab extends Plugin {
       let cur; try { cur = !!cm.state.readOnly; } catch (e) { cur = undefined; }
       if (cur !== lock) { try { cm.dispatch({ effects: this.editLock.reconfigure(lock ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []) }); } catch (e) {} }
     }
-    if (lock) this.setCollab(this._resetting ? '♻️ 서버본으로 다시 받는 중… 편집 잠금' : this._dupName ? ('🔴 기기 이름 «' + this.settings.deviceLabel + '» 중복 — 이름 바꿔야 편집·동기화') : this._outdated ? ('🔺 업데이트 필요 → ' + (this._latestVer || '') + ' · 편집잠금') : this._harnessLock ? '🤖 하네스가 정리하는 중… 잠시 편집 잠금' : (this._collabConnecting && !this.isOffline() && !this._gating) ? '🔄 노트 동기화 중… 편집 잠금' : '🔒 오프라인·편집잠금');
+    if (lock) this.setCollab(this._resetting ? '♻️ 서버본으로 다시 받는 중… 편집 잠금' : this._modReadonly ? '📖 관리자가 읽기모드로 설정 — 편집 잠금' : kicked ? ('🚫 관리자가 내보냄 — ' + Math.max(1, Math.ceil((this._kickUntil - Date.now()) / 60000)) + '분 남음') : this._dupName ? ('🔴 기기 이름 «' + this.settings.deviceLabel + '» 중복 — 이름 바꿔야 편집·동기화') : this._outdated ? ('🔺 업데이트 필요 → ' + (this._latestVer || '') + ' · 편집잠금') : this._harnessLock ? '🤖 하네스가 정리하는 중… 잠시 편집 잠금' : (this._collabConnecting && !this.isOffline() && !this._gating) ? '🔄 노트 동기화 중… 편집 잠금' : '🔒 오프라인·편집잠금');
     else if (this._lastLock) this.setCollab((this.session && this.session.provider && this.session.provider.wsconnected) ? '연결됨·' + this.peerCount() : '연결 안됨');
     this._lastLock = lock;
     this.updateDisconnectModal();
@@ -648,12 +770,17 @@ export default class VaultSyncCollab extends Plugin {
     const p = (async () => {
       const token = await this.getToken(); if (!token) return;
       if (this.presence || gen !== (this._presGen | 0)) return;   // 그 사이 stopPresence/재로그인 → 이번 것은 버린다
+      if (this._kickUntil && this._kickScope === 'all' && Date.now() < this._kickUntil) return;   // 추방 중엔 안 붙는다(붙어봐야 relay 가 끊는다)
       const doc = new Y.Doc();
-      const prov = new WebsocketProvider(this.settings.wsUrl, '__presence__', doc, { params: { token, v: this.manifest.version } });   // v: relay 가 옛 플러그인 차단(강제 업데이트)
+      const prov = new WebsocketProvider(this.settings.wsUrl, '__presence__', doc, { params: { token, v: this.manifest.version, d: this.settings.deviceId } });   // v: relay 가 옛 플러그인 차단(강제 업데이트) · d: 관리(읽기모드·추방) 대상 식별
       this._presenceDoc = doc; this.presence = prov;
       prov.awareness.setLocalStateField('user', { name: `${this.settings.username}·${this.settings.deviceLabel}`, color: this.userColor, login: this.settings.username, device: this.settings.deviceLabel, deviceId: this.settings.deviceId });
       this.updatePresencePath();
       prov.awareness.on('change', () => this.onPresenceChange());
+      // relay 가 관리 상태(읽기모드·추방)를 이 방의 meta 로 즉시 밀어 준다 → 관리자가 누르면 바로 걸린다.
+      const pmeta = doc.getMap('meta');
+      pmeta.observe(() => { try { this.applyMod(pmeta.get('mod')); } catch (e) {} });
+      prov.on('connection-close', (e) => { if (e && e.code === 4403) this.onKicked(e.reason, null); });
     })();
     this._presStarting = p;
     try { await p; } finally { if (this._presStarting === p) this._presStarting = null; }
@@ -768,6 +895,10 @@ export default class VaultSyncCollab extends Plugin {
     this.updatePresencePath();
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
     const file = view && view.file; const path = file ? file.path : null;
+    // 추방 중이면 그 노트(또는 전체)에는 안 붙는다 — 붙어봐야 relay 가 끊고, 잠금은 refreshLock 이 건다.
+    if (this._kickUntil && Date.now() < this._kickUntil && (this._kickScope === 'all' || (path && nfc(path) === this._kickPath))) {
+      this.endSession(); this._startingPath = null; this.refreshLock(); return;
+    }
     if (this.session && this.session.path === path) return;
     if (this._startingPath === path) return;             // 같은 노트 세션을 이미 시작하는 중 → 중복 provider 방지(active-leaf-change+file-open 이중발화 경합)
     this._startingPath = path;
@@ -789,7 +920,7 @@ export default class VaultSyncCollab extends Plugin {
     if (gen !== (this._sessGen | 0)) return;   // 그 사이 다른 노트로 옮겼다/세션을 닫았다 → 이번 것은 안 만든다
     const path = file.path; const ydoc = new Y.Doc();
     const room = 'note:' + b64url(path.normalize('NFC'));
-    const provider = new WebsocketProvider(this.settings.wsUrl, room, ydoc, { params: { token, v: this.manifest.version } });   // v: relay 가 옛 플러그인 차단(강제 업데이트)
+    const provider = new WebsocketProvider(this.settings.wsUrl, room, ydoc, { params: { token, v: this.manifest.version, d: this.settings.deviceId } });   // v: relay 가 옛 플러그인 차단(강제 업데이트) · d: 관리(읽기모드·추방) 대상 식별
     const ytext = ydoc.getText('content');
     const meta = ydoc.getMap('meta');   // 하네스가 이 노트를 쓰는 동안 meta.lock 을 건다(플러그인은 lock 을 안 건다) → 관찰해서 편집잠금
     const label = `${this.settings.username}·${this.settings.deviceLabel}`;
@@ -798,7 +929,10 @@ export default class VaultSyncCollab extends Plugin {
     this.session = session; this.collabPath = nfc(path);   // ← 파일동기화가 이 노트를 안 건드리게
     provider.on('status', (e) => { if (this.session === session) { this.setCollab(e.status === 'connected' ? '연결됨' : '연결 중…'); this.refreshLock(); } });
     provider.awareness.on('change', () => { if (this.session === session) { this.setCollab('연결됨·' + this.peerCount()); this.followScroll(session); } });
-    provider.on('connection-close', async () => { this._token = null; if (this.session === session) this.refreshLock(); });
+    provider.on('connection-close', async (e) => {
+      if (e && e.code === 4403) return this.onKicked(e.reason, path);   // 관리자가 이 노트(또는 전체)에서 내보냈다
+      this._token = null; if (this.session === session) this.refreshLock();
+    });
     const onSync = async (isSynced) => {
       if (!isSynced || session.attached || this.session !== session) return;
       if (ytext.length === 0) { try { const content = await this.app.vault.read(file); if (this.session !== session) return; if (content && ytext.length === 0) ydoc.transact(() => ytext.insert(0, content)); } catch (e) {} }
@@ -823,7 +957,8 @@ export default class VaultSyncCollab extends Plugin {
         if (f) { this.applying = true; try { await this.app.vault.modify(f, text); session.lastWritten = text; this.shadow.set(nfc(path), text); } finally { this.applying = false; } }
       } catch (e) {} }, 700); };
       session.persist = persist; ytext.observe(persist);
-      try { cm.dispatch({ effects: this.compartment.reconfigure(yCollab(ytext, provider.awareness)) }); } catch (e) { console.error('[collab] attach', e); }
+      // awarenessFilter: «커서 안 보이기» 로 지정한 사람만 이 화면에서 빠진다(내용·상대 편집엔 영향 없음).
+      try { cm.dispatch({ effects: this.compartment.reconfigure(yCollab(ytext, this.awarenessFilter(provider.awareness))) }); } catch (e) { console.error('[collab] attach', e); }
       this.setCollab('연결됨·' + this.peerCount()); this.refreshLock();
       setTimeout(() => this.followScroll(session), 400);   // 따라가는 중이면 그 사람 커서로 스크롤
     };
@@ -1074,23 +1209,49 @@ class ParticipantModal extends Modal {
       ul.empty();
       const states = [...pres.awareness.getStates().values()].filter((st) => st && st.user && st.user.name);
       if (!states.length) { ul.createEl('li', { text: '(없음)' }); return; }
+      const admin = !!this.plugin._modAdmin;                       // 관리 버튼은 관리자 계정에서만 보인다(서버도 다시 확인한다)
+      const mod = this.plugin._modAll || { readonly: [], bans: {} };
       for (const st of states) {
         const u = st.user; const name = u.name; const mine = (name === myLabel);
-        const li = ul.createEl('li'); li.style.display = 'flex'; li.style.alignItems = 'center'; li.style.gap = '8px'; li.style.padding = '5px 0';
+        const li = ul.createEl('li'); li.style.display = 'flex'; li.style.flexWrap = 'wrap'; li.style.alignItems = 'center'; li.style.gap = '6px'; li.style.padding = '5px 0';
         const dot = li.createSpan({ text: '●' }); dot.style.color = u.color || 'var(--text-muted)';
-        const info = li.createDiv(); info.style.flex = '1';
-        info.createDiv({ text: name + (mine ? ' (나)' : '') });
+        const info = li.createDiv(); info.style.flex = '1'; info.style.minWidth = '45%';
+        const key = this.plugin.modKey(u.login, u.deviceId);
+        const ro = (mod.readonly || []).indexOf(key) >= 0;
+        const ban = (mod.bans || {})[key];
+        const banLeft = (ban && ban.until > Date.now()) ? Math.max(1, Math.ceil((ban.until - Date.now()) / 60000)) : 0;
+        const hidden = this.plugin.hiddenPeers && this.plugin.hiddenPeers.has(name);
+        info.createDiv({ text: name + (mine ? ' (나)' : '') + (ro ? ' 📖' : '') + (banLeft ? ' 🚫' : '') + (hidden ? ' 🙈' : '') });
         const where = st.path ? st.path.split('/').pop() : '(노트 없음)';
-        const sub = info.createDiv({ text: '📄 ' + where }); sub.style.fontSize = '0.8em'; sub.style.color = 'var(--text-muted)';
-        if (!mine) {
-          const following = (this.plugin.following === name);
-          const btn = li.createEl('button', { text: following ? '따라가기 해제' : '따라가기' });
-          if (following) btn.classList.add('mod-cta');
-          btn.onclick = async () => { if (this.plugin.following === name) this.plugin.unfollow(); else await this.plugin.followUser(name); render(); };
+        const sub = info.createDiv({ text: '📄 ' + where + (ro ? ' · 읽기모드' : '') + (banLeft ? ` · 추방 ${banLeft}분 남음` : '') });
+        sub.style.fontSize = '0.8em'; sub.style.color = 'var(--text-muted)';
+        if (mine) continue;
+        const following = (this.plugin.following === name);
+        const btn = li.createEl('button', { text: following ? '따라가기 해제' : '따라가기' });
+        if (following) btn.classList.add('mod-cta');
+        btn.onclick = async () => { if (this.plugin.following === name) this.plugin.unfollow(); else await this.plugin.followUser(name); render(); };
+        if (!admin) continue;
+        // 커서 숨기기는 «내 화면에서만» — 서버에 안 남고 상대·다른 사람에겐 영향이 없다.
+        const eye = li.createEl('button', { text: hidden ? '커서 보이기' : '커서 숨기기' });
+        eye.onclick = () => { this.plugin.toggleHidePeer(name); render(); };
+        // 읽기모드는 관리자가 풀 때까지 유지된다(상대가 껐다 켜도, relay 를 재시작해도).
+        const rob = li.createEl('button', { text: ro ? '읽기모드 해제' : '읽기모드' });
+        if (ro) rob.classList.add('mod-cta');
+        rob.onclick = async () => { rob.disabled = true; await this.plugin.adminReadonly(u, !ro); render(); };
+        if (banLeft) {
+          const un = li.createEl('button', { text: '추방 해제' }); un.classList.add('mod-cta');
+          un.onclick = async () => { un.disabled = true; await this.plugin.adminUnkick(u); render(); };
+        } else {
+          const kr = li.createEl('button', { text: '이 노트에서 추방' });
+          kr.disabled = !st.path;   // 보고 있는 노트가 없으면 «그 노트 방»이 없다
+          kr.onclick = async () => { kr.disabled = true; await this.plugin.adminKick(u, 'room', st.path); render(); };
+          const ka = li.createEl('button', { text: '연결 차단' }); ka.classList.add('mod-warning');
+          ka.onclick = async () => { ka.disabled = true; await this.plugin.adminKick(u, 'all', null); render(); };
         }
       }
     };
     render(); this._h = () => render(); pres.awareness.on('change', this._h);
+    this.plugin.fetchMod().then(() => render());   // 내가 관리자인지·누가 잠겨 있는지를 서버에서 받아 다시 그린다
   }
   onClose() { try { if (this._h && this.plugin.presence) this.plugin.presence.awareness.off('change', this._h); } catch (e) {} try { if (this._sh) window.clearInterval(this._sh); } catch (e) {} this.contentEl.empty(); }
 }
