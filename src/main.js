@@ -31,6 +31,12 @@ const UPDATE_REPO = 'rablove/obsidian-collab-relay';   // 버전 확인 대상(�
 // 충돌 진단 레코드를 모아 두는 서버상의 자리. 경로가 `.md` 로 끝나지 않아 applyRemote 가 걸러내므로
 // 어느 기기에도 파일로 내려가지 않는다(진단 전용). 읽기·집계는 하네스 `conflicts.py events`.
 const DIAG_DIR = '60_System/_sync-diag';
+// 캔버스 카드의 «진짜 버튼»(```lpms-ask / ```lpms-run)이 눌리면 요청을 여기에 남긴다.
+// _sync-diag 와 같은 방식 — 경로가 `.md` 로 안 끝나 applyRemote 가 걸러내므로 어느 기기에도
+// 파일로 내려가지 않는다. ⭐ 캔버스 파일을 안 건드리는 게 핵심이다: 판을 고쳐서 알리면
+// 「열어 둔 캔버스」 문제(아래 canvasOpenPaths 주석)를 그대로 지나게 된다.
+const ASK_DIR = '60_System/_canvas-ask';
+const ASK_MAX_PER_HOUR = 6;   // 실수로 눌러대도 세션이 수십 개 뜨지 않게 (canvas_watch.py 와 같은 상한)
 // ⛔ 아래 «그림·캔버스» 관련은 main-db(이 플러그인) 전용이다 — ai-study-sync 에는 «일부러» 넣지 않았다
 //    (형 지시 2026-08-13: 「ai-study-db는 해당 없으니 main-db에 한해서」). 그래서 두 소스의 차이가
 //    18줄에서 크게 벌어져 있다. 다음에 두 파일을 맞출 때 여기를 통째로 옮기면 그림·캔버스가
@@ -122,6 +128,18 @@ const COLLAB_CSS = `
 }
 .cm-ySelection { border-radius: 2px; }
 body.collab-syncgate-open .modal-close-button, body.collab-harnesslock-open .modal-close-button { display: none !important; }
+/* 캔버스 카드의 «진짜 버튼». 테마 변수를 쓰므로 라이트/다크 둘 다 따라간다. */
+.lpms-ask { display: flex; flex-direction: column; gap: 6px; margin: 2px 0; }
+.lpms-ask-text { white-space: pre-wrap; line-height: 1.45; }
+.lpms-ask-btn {
+  align-self: flex-start; cursor: pointer; padding: 5px 14px; border-radius: 6px;
+  font-weight: 600; border: 1px solid var(--interactive-accent);
+  background: var(--interactive-accent); color: var(--text-on-accent);
+}
+.lpms-ask-btn:hover:not(:disabled) { background: var(--interactive-accent-hover); }
+.lpms-ask-btn:disabled { opacity: .5; cursor: default; }
+.lpms-ask-run .lpms-ask-btn { background: var(--color-red, #d64545); border-color: var(--color-red, #d64545); }
+.lpms-ask-note { font-size: 12px; color: var(--text-muted); }
 `;
 
 export default class VaultSyncCollab extends Plugin {
@@ -142,6 +160,10 @@ export default class VaultSyncCollab extends Plugin {
     this._kickUntil = 0; this._kickScope = null; this._kickPath = null; this.hiddenPeers = new Set();
 
     this.registerEditorExtension([this.compartment.of([]), this.editLock.of([])]);
+    // 캔버스 카드·노트의 ```lpms-ask / ```lpms-run 을 진짜 버튼으로 그린다.
+    // 안 그려지면(그 렌더 경로에 처리기가 안 걸리면) 그냥 코드블록으로 보인다 — 체크상자 버튼은 그대로 있다.
+    this.registerMarkdownCodeBlockProcessor('lpms-ask', (src, el, ctx) => this.renderAskBlock(src, el, ctx, 'ask'));
+    this.registerMarkdownCodeBlockProcessor('lpms-run', (src, el, ctx) => this.renderAskBlock(src, el, ctx, 'run'));
     this.addSettingTab(new SettingTab(this.app, this));
     this.syncEl = this.addStatusBarItem(); this.setSync('시작…');
     this.collabEl = this.addStatusBarItem(); this.setCollab('연결 안됨');
@@ -171,6 +193,8 @@ export default class VaultSyncCollab extends Plugin {
       // 협업 이벤트
       this.registerEvent(this.app.workspace.on('active-leaf-change', () => this.onActiveChange()));
       this.registerEvent(this.app.workspace.on('file-open', () => this.onActiveChange()));
+      // 열려 있어 미뤄 둔 캔버스가 닫히는 것을 본다 (탭을 닫으면 layout-change 가 온다). 미룬 게 없으면 즉시 빠진다.
+      this.registerEvent(this.app.workspace.on('layout-change', () => this.canvasReconcile()));
       // 네트워크 끊김/복구를 즉시 감지 → 편집잠금 갱신 + 복구 시 바로 서버 변경분 당겨받기
       this.registerDomEvent(window, 'offline', () => this.setNet(false));
       this.registerDomEvent(window, 'online', () => this.setNet(true));
@@ -204,6 +228,111 @@ export default class VaultSyncCollab extends Plugin {
   isSyncPath(p) { return this.isTextPath(p) || this.isBinPath(p); }
   // ⭐ 줄 단위 3-way 병합은 .md 에만 쓴다. 캔버스는 JSON 이라 «겹치지 않는 줄»을 합쳐도 구조가 깨질 수 있다.
   canMerge(p) { return String(p || '').endsWith('.md'); }
+  // ⭐ 열어 둔 캔버스는 서버본으로 «덮지 않는다».
+  //  .md 는 열면 relay 가 주인이 되어(collabPath) 파일동기화가 손을 떼는데, 그 자리는
+  //  getActiveViewOfType(MarkdownView) 로 정해져 **캔버스는 collabPath 가 될 수 없다**.
+  //  캔버스뷰는 판 상태를 메모리에 들고 있다가 저장하므로, 카드를 끌고 있는 중에 밑에서
+  //  파일이 갈리면 그 판본이 되돌아와 **방금 받은 것을 덮는다**(= 서버가 쓴 것을 잃는다).
+  //  → 열려 있는 동안은 미뤄 두고, 닫히면 canvasReconcile 이 그때 받아 맞춘다.
+  //  활성 탭만 보면(getActiveFile) 뒤 탭에 열어 둔 판을 놓친다 — 열린 캔버스 뷰를 다 센다.
+  canvasOpenPaths() {
+    const out = new Set();
+    const ws = this.app && this.app.workspace;
+    if (!ws || typeof ws.getLeavesOfType !== 'function') return out;   // 캔버스가 없는 환경(옛 옵시디언·시험)에선 지킬 것도 없다
+    try {
+      for (const leaf of (ws.getLeavesOfType('canvas') || [])) {
+        const f = leaf && leaf.view && leaf.view.file;
+        if (f && f.path) out.add(nfc(f.path));
+      }
+    } catch (e) { console.error('[sync] canvasOpenPaths', e); }
+    return out;
+  }
+  canvasOpen(p) { return this.canvasOpenPaths().has(nfc(p)); }
+  /* ── 캔버스 카드의 «진짜 버튼» ───────────────────────────────────────────
+     카드(또는 노트)에 이렇게 적으면 버튼으로 그려진다:
+
+         ```lpms-ask
+         unit: 2.4          ← 없어도 된다(없으면 판 전체)
+         세 도메인 단위가 다 m/s² 인가?
+         ```
+         ```lpms-run
+         ```
+
+     누르면 **서버에만** 요청 문서를 남긴다(ASK_DIR). 캔버스 파일은 안 건드린다 —
+     판을 고쳐서 알리면 위 «열어 둔 캔버스» 문제를 그대로 지나기 때문이다.
+     마크다운 체크상자 버튼은 그대로 둔다(이게 안 그려지는 곳에서도 눌리게). */
+  renderAskBlock(src, el, ctx, kind) {
+    const lines = String(src || '').split('\n');
+    let unit = null;
+    if (lines.length && /^\s*unit\s*:/i.test(lines[0])) { unit = lines.shift().replace(/^\s*unit\s*:/i, '').trim() || null; }
+    const text = lines.join('\n').trim();
+    const box = el.createDiv({ cls: 'lpms-ask' + (kind === 'run' ? ' lpms-ask-run' : '') });
+    if (kind === 'ask' && text) box.createDiv({ cls: 'lpms-ask-text', text });
+    const btn = box.createEl('button', { cls: 'lpms-ask-btn', text: kind === 'run' ? '▶ 돌리기' : '⟹ 보내기' });
+    const note = box.createDiv({ cls: 'lpms-ask-note', text: unit ? `${unit} 에 대한 것` : (kind === 'run' ? '이 판 그대로 돌립니다' : '판 전체에 대한 물음') });
+    btn.onclick = async () => {
+      if (btn.disabled) return;
+      btn.disabled = true; note.setText('올리는 중…');
+      const af = this.app.workspace.getActiveFile();
+      const board = (ctx && ctx.sourcePath) || (af ? af.path : '');
+      const r = await this.sendCanvasAsk({ board, kind, text, unit });
+      note.setText(r.msg);
+      if (!r.ok) { btn.disabled = false; return; }
+      // 다시 누를 수는 있게 하되 바로는 아니다 — 손이 두 번 가서 세션이 둘 뜨는 것을 막는다.
+      window.setTimeout(() => { try { btn.disabled = false; btn.setText('다시 보내기'); } catch (e) {} }, 10000);
+    };
+  }
+  async sendCanvasAsk({ board, kind, text, unit }) {
+    if (!this.configured()) return { ok: false, msg: '⛔ 로그인부터 하십시오' };
+    if (kind === 'ask' && !text) return { ok: false, msg: '⛔ 물음을 적고 누르십시오' };
+    const now = Date.now();
+    this._askSent = (this._askSent || []).filter((t) => now - t < 3600000);
+    if (this._askSent.length >= ASK_MAX_PER_HOUR) return { ok: false, msg: `⛔ 한 시간 상한(${ASK_MAX_PER_HOUR}건)에 걸렸습니다` };
+    const at = new Date(now).toISOString();
+    const dev = this.settings.deviceId || 'unknown';
+    const p = `${ASK_DIR}/${at.replace(/[:.]/g, '-')}_${dev}`;
+    const rec = { board: board || null, kind, text: text || '', unit: unit || null, at, device: dev };
+    try {
+      const id = this.idFor(p);
+      // content 에 JSON 문자열을 둔다 — 하네스가 vaultio.read(경로) 로 그대로 읽는다.
+      // rec 는 문서를 직접 볼 때를 위한 것(파싱 없이 보인다).
+      const res = await this.req('PUT', this.docUrl(id), { _id: id, path: p, kind: 'canvas-ask',
+        mtime: now, deleted: false, clientVersion: this.manifest.version, content: JSON.stringify(rec), rec });
+      if (res.status === 200 || res.status === 201) {
+        this._askSent.push(now);
+        new Notice(kind === 'run' ? '▶ 돌리기 요청을 올렸습니다' : '⟹ 물음을 올렸습니다');
+        const d = new Date(now), z = (n) => String(n).padStart(2, '0');
+        return { ok: true, msg: `✅ 올렸습니다 ${z(d.getHours())}:${z(d.getMinutes())}` };
+      }
+      console.error('[sync] canvasAsk', res.status, p);
+      return { ok: false, msg: `⛔ 못 올렸습니다 (${res.status})` };
+    } catch (e) { console.error('[sync] canvasAsk', e); return { ok: false, msg: '⛔ 못 올렸습니다 (연결)' }; }
+  }
+  // 미룬 것을 기억해 둔다(닫힐 때 받으려고). 처음 미룰 때만 알린다 — 왜 판이 안 바뀌는지 보이게.
+  deferCanvas(p) {
+    const k = nfc(p);
+    if (!this._canvasDefer) this._canvasDefer = new Set();
+    if (!this._canvasDefer.has(k)) {
+      this._canvasDefer.add(k);
+      new Notice(`🗂 «${k.split('/').pop()}» 이 열려 있어 서버본을 안 덮었습니다 — 닫으면 반영됩니다`, 8000);
+    }
+    return false;
+  }
+  // 미뤄 둔 캔버스가 닫혔으면 그 문서를 받아 applyRemote 로 정상 경로를 태운다.
+  // (닫힌 뒤엔 여느 파일과 같다 — 기준선이 그대로면 서버본이 조용히 들어오고, 그 사이 형이 판을
+  //  고쳤으면 여느 때처럼 최신 승 + 사본이다. 잃는 것은 없다.)
+  async canvasReconcile() {
+    if (!this._canvasDefer || !this._canvasDefer.size || !this.configured()) return;
+    const open = this.canvasOpenPaths();
+    for (const p of Array.from(this._canvasDefer)) {
+      if (open.has(p)) continue;
+      this._canvasDefer.delete(p);
+      try {
+        const cur = await this.req('GET', this.docUrl(this.idFor(p)));
+        if (cur.status === 200 && cur.json) { if (await this.applyRemote(cur.json)) this.setSync('↓ 1'); }
+      } catch (e) { console.error('[sync] canvasReconcile', p, e); }
+    }
+  }
   // 그림의 «마지막으로 맞춘 내용»을 해시로 기억한다(.md 의 shadow 와 같은 자리, 값만 해시).
   //  shadow 와 나눠 둔 이유: shadow 는 3-way 병합의 기준선이라 본문 전체가 필요한데, 그림은 견주기만 하면 된다.
   _binShadow() { if (!this.__binShadow) this.__binShadow = new Map(); return this.__binShadow; }
@@ -505,10 +634,12 @@ export default class VaultSyncCollab extends Plugin {
     if (this.isBinPath(p)) return this.applyRemoteBin(doc, p);   // 그림 — 첨부(bin)를 따로 받아 통째로
     if (!this.isTextPath(p)) return false;
     if (nfc(p) === this.collabPath) return false;   // 협업 중인 노트 → relay(Yjs)가 소유, 건드리지 않음
+    if (this.isCanvasPath(p) && this.canvasOpen(p)) return this.deferCanvas(p);   // 열어 둔 캔버스는 덮지 않는다 — 닫히면 canvasReconcile 이 받는다
     const R = doc.content || '';
     try {
       const exists = await this.app.vault.adapter.exists(p);
       if (nfc(p) === this.collabPath) return false;   // 확인하는 사이에 이 노트가 열렸다 → relay 가 주인, 손대지 않는다
+      if (this.isCanvasPath(p) && this.canvasOpen(p)) return this.deferCanvas(p);   // 확인하는 사이에 이 캔버스가 열렸다
       if (doc.deleted || doc._deleted) {
         if (exists) { this.applying = true; try { const af = this.app.vault.getAbstractFileByPath(p); if (af) await this.app.vault.trash(af, false); else await this.app.vault.adapter.remove(p); } finally { this.applying = false; } await this.pruneEmptyParents(p); }
         this.shadow.delete(p); return exists;
@@ -516,6 +647,7 @@ export default class VaultSyncCollab extends Plugin {
       if (!exists) { await this.writeLocal(p, R); this.shadow.set(p, R); return true; }
       const local = await this.app.vault.adapter.read(p);
       if (nfc(p) === this.collabPath) return false;   // 읽는 사이에 이 노트가 열렸다 → relay 가 주인(뒤에서 도는 전체 확인이 열린 노트를 덮는 것 방지)
+      if (this.isCanvasPath(p) && this.canvasOpen(p)) return this.deferCanvas(p);   // 읽는 사이에 이 캔버스가 열렸다
       if (local === R) { this.shadow.set(p, R); return false; }
       const base = this.shadow.get(p);
       if (base === undefined) {

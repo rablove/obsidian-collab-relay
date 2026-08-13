@@ -10376,6 +10376,8 @@ var DEFAULTS = {
 };
 var UPDATE_REPO = "rablove/obsidian-collab-relay";
 var DIAG_DIR = "60_System/_sync-diag";
+var ASK_DIR = "60_System/_canvas-ask";
+var ASK_MAX_PER_HOUR = 6;
 var BIN_EXT = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", svg: "image/svg+xml" };
 var BIN_MAX = 2 * 1024 * 1024;
 var nfc = (s) => s.normalize("NFC");
@@ -10598,6 +10600,18 @@ var COLLAB_CSS = `
 }
 .cm-ySelection { border-radius: 2px; }
 body.collab-syncgate-open .modal-close-button, body.collab-harnesslock-open .modal-close-button { display: none !important; }
+/* \uCE94\uBC84\uC2A4 \uCE74\uB4DC\uC758 \xAB\uC9C4\uC9DC \uBC84\uD2BC\xBB. \uD14C\uB9C8 \uBCC0\uC218\uB97C \uC4F0\uBBC0\uB85C \uB77C\uC774\uD2B8/\uB2E4\uD06C \uB458 \uB2E4 \uB530\uB77C\uAC04\uB2E4. */
+.lpms-ask { display: flex; flex-direction: column; gap: 6px; margin: 2px 0; }
+.lpms-ask-text { white-space: pre-wrap; line-height: 1.45; }
+.lpms-ask-btn {
+  align-self: flex-start; cursor: pointer; padding: 5px 14px; border-radius: 6px;
+  font-weight: 600; border: 1px solid var(--interactive-accent);
+  background: var(--interactive-accent); color: var(--text-on-accent);
+}
+.lpms-ask-btn:hover:not(:disabled) { background: var(--interactive-accent-hover); }
+.lpms-ask-btn:disabled { opacity: .5; cursor: default; }
+.lpms-ask-run .lpms-ask-btn { background: var(--color-red, #d64545); border-color: var(--color-red, #d64545); }
+.lpms-ask-note { font-size: 12px; color: var(--text-muted); }
 `;
 var VaultSyncCollab = class extends import_obsidian.Plugin {
   async onload() {
@@ -10632,6 +10646,8 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     this._kickPath = null;
     this.hiddenPeers = /* @__PURE__ */ new Set();
     this.registerEditorExtension([this.compartment.of([]), this.editLock.of([])]);
+    this.registerMarkdownCodeBlockProcessor("lpms-ask", (src, el, ctx) => this.renderAskBlock(src, el, ctx, "ask"));
+    this.registerMarkdownCodeBlockProcessor("lpms-run", (src, el, ctx) => this.renderAskBlock(src, el, ctx, "run"));
     this.addSettingTab(new SettingTab(this.app, this));
     this.syncEl = this.addStatusBarItem();
     this.setSync("\uC2DC\uC791\u2026");
@@ -10671,6 +10687,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       this.registerInterval(window.setInterval(() => this.syncCycle(), 6e4));
       this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.onActiveChange()));
       this.registerEvent(this.app.workspace.on("file-open", () => this.onActiveChange()));
+      this.registerEvent(this.app.workspace.on("layout-change", () => this.canvasReconcile()));
       this.registerDomEvent(window, "offline", () => this.setNet(false));
       this.registerDomEvent(window, "online", () => this.setNet(true));
       this.registerInterval(window.setInterval(() => this.refreshLock(), 3e3));
@@ -10738,6 +10755,139 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   // ⭐ 줄 단위 3-way 병합은 .md 에만 쓴다. 캔버스는 JSON 이라 «겹치지 않는 줄»을 합쳐도 구조가 깨질 수 있다.
   canMerge(p) {
     return String(p || "").endsWith(".md");
+  }
+  // ⭐ 열어 둔 캔버스는 서버본으로 «덮지 않는다».
+  //  .md 는 열면 relay 가 주인이 되어(collabPath) 파일동기화가 손을 떼는데, 그 자리는
+  //  getActiveViewOfType(MarkdownView) 로 정해져 **캔버스는 collabPath 가 될 수 없다**.
+  //  캔버스뷰는 판 상태를 메모리에 들고 있다가 저장하므로, 카드를 끌고 있는 중에 밑에서
+  //  파일이 갈리면 그 판본이 되돌아와 **방금 받은 것을 덮는다**(= 서버가 쓴 것을 잃는다).
+  //  → 열려 있는 동안은 미뤄 두고, 닫히면 canvasReconcile 이 그때 받아 맞춘다.
+  //  활성 탭만 보면(getActiveFile) 뒤 탭에 열어 둔 판을 놓친다 — 열린 캔버스 뷰를 다 센다.
+  canvasOpenPaths() {
+    const out = /* @__PURE__ */ new Set();
+    const ws = this.app && this.app.workspace;
+    if (!ws || typeof ws.getLeavesOfType !== "function") return out;
+    try {
+      for (const leaf of ws.getLeavesOfType("canvas") || []) {
+        const f = leaf && leaf.view && leaf.view.file;
+        if (f && f.path) out.add(nfc(f.path));
+      }
+    } catch (e) {
+      console.error("[sync] canvasOpenPaths", e);
+    }
+    return out;
+  }
+  canvasOpen(p) {
+    return this.canvasOpenPaths().has(nfc(p));
+  }
+  /* ── 캔버스 카드의 «진짜 버튼» ───────────────────────────────────────────
+       카드(또는 노트)에 이렇게 적으면 버튼으로 그려진다:
+  
+           ```lpms-ask
+           unit: 2.4          ← 없어도 된다(없으면 판 전체)
+           세 도메인 단위가 다 m/s² 인가?
+           ```
+           ```lpms-run
+           ```
+  
+       누르면 **서버에만** 요청 문서를 남긴다(ASK_DIR). 캔버스 파일은 안 건드린다 —
+       판을 고쳐서 알리면 위 «열어 둔 캔버스» 문제를 그대로 지나기 때문이다.
+       마크다운 체크상자 버튼은 그대로 둔다(이게 안 그려지는 곳에서도 눌리게). */
+  renderAskBlock(src, el, ctx, kind) {
+    const lines = String(src || "").split("\n");
+    let unit = null;
+    if (lines.length && /^\s*unit\s*:/i.test(lines[0])) {
+      unit = lines.shift().replace(/^\s*unit\s*:/i, "").trim() || null;
+    }
+    const text2 = lines.join("\n").trim();
+    const box = el.createDiv({ cls: "lpms-ask" + (kind === "run" ? " lpms-ask-run" : "") });
+    if (kind === "ask" && text2) box.createDiv({ cls: "lpms-ask-text", text: text2 });
+    const btn = box.createEl("button", { cls: "lpms-ask-btn", text: kind === "run" ? "\u25B6 \uB3CC\uB9AC\uAE30" : "\u27F9 \uBCF4\uB0B4\uAE30" });
+    const note = box.createDiv({ cls: "lpms-ask-note", text: unit ? `${unit} \uC5D0 \uB300\uD55C \uAC83` : kind === "run" ? "\uC774 \uD310 \uADF8\uB300\uB85C \uB3CC\uB9BD\uB2C8\uB2E4" : "\uD310 \uC804\uCCB4\uC5D0 \uB300\uD55C \uBB3C\uC74C" });
+    btn.onclick = async () => {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      note.setText("\uC62C\uB9AC\uB294 \uC911\u2026");
+      const af = this.app.workspace.getActiveFile();
+      const board = ctx && ctx.sourcePath || (af ? af.path : "");
+      const r = await this.sendCanvasAsk({ board, kind, text: text2, unit });
+      note.setText(r.msg);
+      if (!r.ok) {
+        btn.disabled = false;
+        return;
+      }
+      window.setTimeout(() => {
+        try {
+          btn.disabled = false;
+          btn.setText("\uB2E4\uC2DC \uBCF4\uB0B4\uAE30");
+        } catch (e) {
+        }
+      }, 1e4);
+    };
+  }
+  async sendCanvasAsk({ board, kind, text: text2, unit }) {
+    if (!this.configured()) return { ok: false, msg: "\u26D4 \uB85C\uADF8\uC778\uBD80\uD130 \uD558\uC2ED\uC2DC\uC624" };
+    if (kind === "ask" && !text2) return { ok: false, msg: "\u26D4 \uBB3C\uC74C\uC744 \uC801\uACE0 \uB204\uB974\uC2ED\uC2DC\uC624" };
+    const now = Date.now();
+    this._askSent = (this._askSent || []).filter((t) => now - t < 36e5);
+    if (this._askSent.length >= ASK_MAX_PER_HOUR) return { ok: false, msg: `\u26D4 \uD55C \uC2DC\uAC04 \uC0C1\uD55C(${ASK_MAX_PER_HOUR}\uAC74)\uC5D0 \uAC78\uB838\uC2B5\uB2C8\uB2E4` };
+    const at = new Date(now).toISOString();
+    const dev = this.settings.deviceId || "unknown";
+    const p = `${ASK_DIR}/${at.replace(/[:.]/g, "-")}_${dev}`;
+    const rec = { board: board || null, kind, text: text2 || "", unit: unit || null, at, device: dev };
+    try {
+      const id2 = this.idFor(p);
+      const res = await this.req("PUT", this.docUrl(id2), {
+        _id: id2,
+        path: p,
+        kind: "canvas-ask",
+        mtime: now,
+        deleted: false,
+        clientVersion: this.manifest.version,
+        content: JSON.stringify(rec),
+        rec
+      });
+      if (res.status === 200 || res.status === 201) {
+        this._askSent.push(now);
+        new import_obsidian.Notice(kind === "run" ? "\u25B6 \uB3CC\uB9AC\uAE30 \uC694\uCCAD\uC744 \uC62C\uB838\uC2B5\uB2C8\uB2E4" : "\u27F9 \uBB3C\uC74C\uC744 \uC62C\uB838\uC2B5\uB2C8\uB2E4");
+        const d = new Date(now), z = (n) => String(n).padStart(2, "0");
+        return { ok: true, msg: `\u2705 \uC62C\uB838\uC2B5\uB2C8\uB2E4 ${z(d.getHours())}:${z(d.getMinutes())}` };
+      }
+      console.error("[sync] canvasAsk", res.status, p);
+      return { ok: false, msg: `\u26D4 \uBABB \uC62C\uB838\uC2B5\uB2C8\uB2E4 (${res.status})` };
+    } catch (e) {
+      console.error("[sync] canvasAsk", e);
+      return { ok: false, msg: "\u26D4 \uBABB \uC62C\uB838\uC2B5\uB2C8\uB2E4 (\uC5F0\uACB0)" };
+    }
+  }
+  // 미룬 것을 기억해 둔다(닫힐 때 받으려고). 처음 미룰 때만 알린다 — 왜 판이 안 바뀌는지 보이게.
+  deferCanvas(p) {
+    const k = nfc(p);
+    if (!this._canvasDefer) this._canvasDefer = /* @__PURE__ */ new Set();
+    if (!this._canvasDefer.has(k)) {
+      this._canvasDefer.add(k);
+      new import_obsidian.Notice(`\u{1F5C2} \xAB${k.split("/").pop()}\xBB \uC774 \uC5F4\uB824 \uC788\uC5B4 \uC11C\uBC84\uBCF8\uC744 \uC548 \uB36E\uC5C8\uC2B5\uB2C8\uB2E4 \u2014 \uB2EB\uC73C\uBA74 \uBC18\uC601\uB429\uB2C8\uB2E4`, 8e3);
+    }
+    return false;
+  }
+  // 미뤄 둔 캔버스가 닫혔으면 그 문서를 받아 applyRemote 로 정상 경로를 태운다.
+  // (닫힌 뒤엔 여느 파일과 같다 — 기준선이 그대로면 서버본이 조용히 들어오고, 그 사이 형이 판을
+  //  고쳤으면 여느 때처럼 최신 승 + 사본이다. 잃는 것은 없다.)
+  async canvasReconcile() {
+    if (!this._canvasDefer || !this._canvasDefer.size || !this.configured()) return;
+    const open = this.canvasOpenPaths();
+    for (const p of Array.from(this._canvasDefer)) {
+      if (open.has(p)) continue;
+      this._canvasDefer.delete(p);
+      try {
+        const cur = await this.req("GET", this.docUrl(this.idFor(p)));
+        if (cur.status === 200 && cur.json) {
+          if (await this.applyRemote(cur.json)) this.setSync("\u2193 1");
+        }
+      } catch (e) {
+        console.error("[sync] canvasReconcile", p, e);
+      }
+    }
   }
   // 그림의 «마지막으로 맞춘 내용»을 해시로 기억한다(.md 의 shadow 와 같은 자리, 값만 해시).
   //  shadow 와 나눠 둔 이유: shadow 는 3-way 병합의 기준선이라 본문 전체가 필요한데, 그림은 견주기만 하면 된다.
@@ -11229,10 +11379,12 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     if (this.isBinPath(p)) return this.applyRemoteBin(doc2, p);
     if (!this.isTextPath(p)) return false;
     if (nfc(p) === this.collabPath) return false;
+    if (this.isCanvasPath(p) && this.canvasOpen(p)) return this.deferCanvas(p);
     const R = doc2.content || "";
     try {
       const exists = await this.app.vault.adapter.exists(p);
       if (nfc(p) === this.collabPath) return false;
+      if (this.isCanvasPath(p) && this.canvasOpen(p)) return this.deferCanvas(p);
       if (doc2.deleted || doc2._deleted) {
         if (exists) {
           this.applying = true;
@@ -11255,6 +11407,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       }
       const local = await this.app.vault.adapter.read(p);
       if (nfc(p) === this.collabPath) return false;
+      if (this.isCanvasPath(p) && this.canvasOpen(p)) return this.deferCanvas(p);
       if (local === R) {
         this.shadow.set(p, R);
         return false;
