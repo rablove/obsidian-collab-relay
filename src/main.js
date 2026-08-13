@@ -249,25 +249,62 @@ export default class VaultSyncCollab extends Plugin {
   }
   canvasOpen(p) { return this.canvasOpenPaths().has(nfc(p)); }
   /* ── 캔버스 카드의 «진짜 버튼» ───────────────────────────────────────────
-     카드(또는 노트)에 이렇게 적으면 버튼으로 그려진다:
+     ⭐ **글은 카드에 적는다. 블록은 버튼만 놓는 자리다.** (형 지시 2026-08-14 —
+        「그 카드 안에 있는 내용이 다 채널로 가게」.) 카드가 이러면:
+
+         세 도메인 단위가 다 m/s² 인가?
 
          ```lpms-ask
-         unit: 2.4          ← 없어도 된다(없으면 판 전체)
-         세 도메인 단위가 다 m/s² 인가?
          ```
-         ```lpms-run
-         ```
+
+        누를 때 **그 카드 글 전체**를 읽어 보낸다(코드블록 줄은 빼고).
+        블록 «안»에 글을 적으면 그게 이긴다 — 노트에서 여러 버튼을 따로 쓸 때를 위한 길이다.
+        `unit: 2.4` 를 블록 안에 적으면 어느 단위인지도 함께 간다(없으면 판 전체).
 
      누르면 **서버에만** 요청 문서를 남긴다(ASK_DIR). 캔버스 파일은 안 건드린다 —
      판을 고쳐서 알리면 위 «열어 둔 캔버스» 문제를 그대로 지나기 때문이다.
      마크다운 체크상자 버튼은 그대로 둔다(이게 안 그려지는 곳에서도 눌리게). */
+  // 버튼이 놓인 «그 카드»에 적힌 글을 읽는다. 두 길을 차례로 본다.
+  askCardText(el, ctx) {
+    let raw = '';
+    try {
+      // ① 원본 마크다운. 코드블록이 차지한 줄만 빼면 형이 적은 글 그대로다(가장 정확).
+      const info = ctx && typeof ctx.getSectionInfo === 'function' ? ctx.getSectionInfo(el) : null;
+      if (info && typeof info.text === 'string') {
+        const L = info.text.split('\n');
+        L.splice(info.lineStart, Math.max(1, (info.lineEnd - info.lineStart) + 1));
+        raw = L.join('\n');
+      }
+    } catch (e) { console.error('[sync] askCardText(source)', e); }
+    if (!raw.trim()) {
+      // ② 원본을 못 주는 자리도 있다 → 그려진 것에서 우리 버튼 상자만 빼고 읽는다.
+      try {
+        const host = (el.closest && el.closest('.markdown-rendered, .markdown-preview-view, .canvas-node-content')) || el.parentElement || el;
+        if (!host || typeof host.cloneNode !== 'function') return '';   // 진짜 DOM 이 아닌 자리(시험 등)
+        const clone = host.cloneNode(true);
+        for (const n of Array.from(clone.querySelectorAll('.lpms-ask'))) n.remove();
+        raw = clone.textContent || '';
+      } catch (e) { console.error('[sync] askCardText(dom)', e); }
+    }
+    return this.cleanAskText(raw);
+  }
+  // 카드에는 물음 말고도 것이 있다 — 안내·누르는 줄·제목. 그것들을 걷어낸다.
+  // (판 카드의 규약을 그대로 따른다: `---` 아래는 안내, 체크상자 줄은 버튼.)
+  cleanAskText(raw) {
+    let t = String(raw || '').split('\n---')[0];
+    t = t.replace(/^\s*[-*]\s*\[[ xX]\].*$/gm, '');   // `- [ ] 보내기` 같은 누르는 줄
+    const L = t.split('\n');
+    while (L.length && (/^\s*$/.test(L[0]) || /^\s*#+\s*$/.test(L[0]) || /^\s*#+\s*[▶⟹]/.test(L[0]))) L.shift();   // 맨 위 카드 제목
+    t = L.join('\n').trim();
+    return t.replace(/^⟹\s*/, '').trim();               // 맨 앞 ⟹ 표시는 물음이 아니다
+  }
   renderAskBlock(src, el, ctx, kind) {
     const lines = String(src || '').split('\n');
     let unit = null;
     if (lines.length && /^\s*unit\s*:/i.test(lines[0])) { unit = lines.shift().replace(/^\s*unit\s*:/i, '').trim() || null; }
-    const text = lines.join('\n').trim();
+    const inner = lines.join('\n').trim();   // 블록 «안»에 적은 글(있으면 이긴다)
     const box = el.createDiv({ cls: 'lpms-ask' + (kind === 'run' ? ' lpms-ask-run' : '') });
-    if (kind === 'ask' && text) box.createDiv({ cls: 'lpms-ask-text', text });
+    if (kind === 'ask' && inner) box.createDiv({ cls: 'lpms-ask-text', text: inner });
     const btn = box.createEl('button', { cls: 'lpms-ask-btn', text: kind === 'run' ? '▶ 돌리기' : '⟹ 보내기' });
     const note = box.createDiv({ cls: 'lpms-ask-note', text: unit ? `${unit} 에 대한 것` : (kind === 'run' ? '이 판 그대로 돌립니다' : '판 전체에 대한 물음') });
     btn.onclick = async () => {
@@ -275,6 +312,8 @@ export default class VaultSyncCollab extends Plugin {
       btn.disabled = true; note.setText('올리는 중…');
       const af = this.app.workspace.getActiveFile();
       const board = (ctx && ctx.sourcePath) || (af ? af.path : '');
+      // ⭐ 누를 때 읽는다 — 그려 놓고 나서 형이 이어 적은 것까지 담기게.
+      const text = inner || this.askCardText(el, ctx);
       const r = await this.sendCanvasAsk({ board, kind, text, unit });
       note.setText(r.msg);
       if (!r.ok) { btn.disabled = false; return; }
@@ -284,7 +323,7 @@ export default class VaultSyncCollab extends Plugin {
   }
   async sendCanvasAsk({ board, kind, text, unit }) {
     if (!this.configured()) return { ok: false, msg: '⛔ 로그인부터 하십시오' };
-    if (kind === 'ask' && !text) return { ok: false, msg: '⛔ 물음을 적고 누르십시오' };
+    if (kind === 'ask' && !text) return { ok: false, msg: '⛔ 이 카드에 물음을 적고 누르십시오' };
     const now = Date.now();
     this._askSent = (this._askSent || []).filter((t) => now - t < 3600000);
     if (this._askSent.length >= ASK_MAX_PER_HOUR) return { ok: false, msg: `⛔ 한 시간 상한(${ASK_MAX_PER_HOUR}건)에 걸렸습니다` };

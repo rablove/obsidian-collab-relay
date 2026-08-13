@@ -10781,27 +10781,66 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     return this.canvasOpenPaths().has(nfc(p));
   }
   /* ── 캔버스 카드의 «진짜 버튼» ───────────────────────────────────────────
-       카드(또는 노트)에 이렇게 적으면 버튼으로 그려진다:
+       ⭐ **글은 카드에 적는다. 블록은 버튼만 놓는 자리다.** (형 지시 2026-08-14 —
+          「그 카드 안에 있는 내용이 다 채널로 가게」.) 카드가 이러면:
+  
+           세 도메인 단위가 다 m/s² 인가?
   
            ```lpms-ask
-           unit: 2.4          ← 없어도 된다(없으면 판 전체)
-           세 도메인 단위가 다 m/s² 인가?
            ```
-           ```lpms-run
-           ```
+  
+          누를 때 **그 카드 글 전체**를 읽어 보낸다(코드블록 줄은 빼고).
+          블록 «안»에 글을 적으면 그게 이긴다 — 노트에서 여러 버튼을 따로 쓸 때를 위한 길이다.
+          `unit: 2.4` 를 블록 안에 적으면 어느 단위인지도 함께 간다(없으면 판 전체).
   
        누르면 **서버에만** 요청 문서를 남긴다(ASK_DIR). 캔버스 파일은 안 건드린다 —
        판을 고쳐서 알리면 위 «열어 둔 캔버스» 문제를 그대로 지나기 때문이다.
        마크다운 체크상자 버튼은 그대로 둔다(이게 안 그려지는 곳에서도 눌리게). */
+  // 버튼이 놓인 «그 카드»에 적힌 글을 읽는다. 두 길을 차례로 본다.
+  askCardText(el, ctx) {
+    let raw = "";
+    try {
+      const info = ctx && typeof ctx.getSectionInfo === "function" ? ctx.getSectionInfo(el) : null;
+      if (info && typeof info.text === "string") {
+        const L = info.text.split("\n");
+        L.splice(info.lineStart, Math.max(1, info.lineEnd - info.lineStart + 1));
+        raw = L.join("\n");
+      }
+    } catch (e) {
+      console.error("[sync] askCardText(source)", e);
+    }
+    if (!raw.trim()) {
+      try {
+        const host = el.closest && el.closest(".markdown-rendered, .markdown-preview-view, .canvas-node-content") || el.parentElement || el;
+        if (!host || typeof host.cloneNode !== "function") return "";
+        const clone = host.cloneNode(true);
+        for (const n of Array.from(clone.querySelectorAll(".lpms-ask"))) n.remove();
+        raw = clone.textContent || "";
+      } catch (e) {
+        console.error("[sync] askCardText(dom)", e);
+      }
+    }
+    return this.cleanAskText(raw);
+  }
+  // 카드에는 물음 말고도 것이 있다 — 안내·누르는 줄·제목. 그것들을 걷어낸다.
+  // (판 카드의 규약을 그대로 따른다: `---` 아래는 안내, 체크상자 줄은 버튼.)
+  cleanAskText(raw) {
+    let t = String(raw || "").split("\n---")[0];
+    t = t.replace(/^\s*[-*]\s*\[[ xX]\].*$/gm, "");
+    const L = t.split("\n");
+    while (L.length && (/^\s*$/.test(L[0]) || /^\s*#+\s*$/.test(L[0]) || /^\s*#+\s*[▶⟹]/.test(L[0]))) L.shift();
+    t = L.join("\n").trim();
+    return t.replace(/^⟹\s*/, "").trim();
+  }
   renderAskBlock(src, el, ctx, kind) {
     const lines = String(src || "").split("\n");
     let unit = null;
     if (lines.length && /^\s*unit\s*:/i.test(lines[0])) {
       unit = lines.shift().replace(/^\s*unit\s*:/i, "").trim() || null;
     }
-    const text2 = lines.join("\n").trim();
+    const inner = lines.join("\n").trim();
     const box = el.createDiv({ cls: "lpms-ask" + (kind === "run" ? " lpms-ask-run" : "") });
-    if (kind === "ask" && text2) box.createDiv({ cls: "lpms-ask-text", text: text2 });
+    if (kind === "ask" && inner) box.createDiv({ cls: "lpms-ask-text", text: inner });
     const btn = box.createEl("button", { cls: "lpms-ask-btn", text: kind === "run" ? "\u25B6 \uB3CC\uB9AC\uAE30" : "\u27F9 \uBCF4\uB0B4\uAE30" });
     const note = box.createDiv({ cls: "lpms-ask-note", text: unit ? `${unit} \uC5D0 \uB300\uD55C \uAC83` : kind === "run" ? "\uC774 \uD310 \uADF8\uB300\uB85C \uB3CC\uB9BD\uB2C8\uB2E4" : "\uD310 \uC804\uCCB4\uC5D0 \uB300\uD55C \uBB3C\uC74C" });
     btn.onclick = async () => {
@@ -10810,6 +10849,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       note.setText("\uC62C\uB9AC\uB294 \uC911\u2026");
       const af = this.app.workspace.getActiveFile();
       const board = ctx && ctx.sourcePath || (af ? af.path : "");
+      const text2 = inner || this.askCardText(el, ctx);
       const r = await this.sendCanvasAsk({ board, kind, text: text2, unit });
       note.setText(r.msg);
       if (!r.ok) {
@@ -10827,7 +10867,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   }
   async sendCanvasAsk({ board, kind, text: text2, unit }) {
     if (!this.configured()) return { ok: false, msg: "\u26D4 \uB85C\uADF8\uC778\uBD80\uD130 \uD558\uC2ED\uC2DC\uC624" };
-    if (kind === "ask" && !text2) return { ok: false, msg: "\u26D4 \uBB3C\uC74C\uC744 \uC801\uACE0 \uB204\uB974\uC2ED\uC2DC\uC624" };
+    if (kind === "ask" && !text2) return { ok: false, msg: "\u26D4 \uC774 \uCE74\uB4DC\uC5D0 \uBB3C\uC74C\uC744 \uC801\uACE0 \uB204\uB974\uC2ED\uC2DC\uC624" };
     const now = Date.now();
     this._askSent = (this._askSent || []).filter((t) => now - t < 36e5);
     if (this._askSent.length >= ASK_MAX_PER_HOUR) return { ok: false, msg: `\u26D4 \uD55C \uC2DC\uAC04 \uC0C1\uD55C(${ASK_MAX_PER_HOUR}\uAC74)\uC5D0 \uAC78\uB838\uC2B5\uB2C8\uB2E4` };
