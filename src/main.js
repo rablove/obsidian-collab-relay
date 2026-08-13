@@ -134,6 +134,10 @@ export default class VaultSyncCollab extends Plugin {
       this.registerInterval(window.setInterval(() => this.lockWatch(), 5000));
       // 관리 상태(읽기모드·추방)는 relay 가 presence 방 meta 로 즉시 밀어 준다. 이 주기 확인은 그걸 놓쳤을 때의 안전망.
       this.registerInterval(window.setInterval(() => this.fetchMod(), 60000));
+      // ⭐ 버전 확인을 주기로도 한다. 전에는 «켤 때»와 «재접속할 때»뿐이라, 옵시디언을 켜 둔 채로 며칠 쓰면
+      //  새 릴리스가 나도 못 보고 옛 버전으로 계속 고쳤다 — 그 기기가 충돌의 원인이 된다.
+      //  (checkVersion 자체에 10분 쿨다운이 있어 실제 GitHub 요청은 10분에 한 번이다.)
+      this.registerInterval(window.setInterval(() => this.checkVersion(), 5 * 60 * 1000));
       this.onActiveChange(); this.ensurePresence(); this.fetchMod();
     });
   }
@@ -1122,7 +1126,7 @@ class UpdateModal extends Modal {
     const { contentEl } = this;
     contentEl.createEl('h3', { text: '🔺 플러그인 업데이트 필요' });
     contentEl.createEl('p', { text: `설치됨 ${this.cur} → 최신 ${this.latest}. 버전이 다르면 동기화 사고가 날 수 있어 편집을 잠갔습니다.` });
-    const g = contentEl.createEl('p', { text: 'BRAT → «Check for updates to all beta plugins» 로 업데이트한 뒤 Obsidian 을 재시작하세요.' }); g.style.color = 'var(--text-muted)';
+    const g = contentEl.createEl('p', { text: 'BRAT → «Check for updates to all beta plugins» 를 누르면 그 자리서 반영됩니다(Obsidian 재시작 안 해도 됩니다). 옵시디언을 껐다 켜도 BRAT 이 시작할 때 알아서 올려 줍니다.' }); g.style.color = 'var(--text-muted)';
     const row = contentEl.createDiv(); row.style.cssText = 'display:flex;justify-content:flex-end;margin-top:8px';
     const ok = row.createEl('button', { text: '확인' }); ok.classList.add('mod-cta'); ok.onclick = () => this.close();
   }

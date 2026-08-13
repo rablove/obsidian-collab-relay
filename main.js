@@ -10547,6 +10547,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       this.registerInterval(window.setInterval(() => this.refreshLock(), 3e3));
       this.registerInterval(window.setInterval(() => this.lockWatch(), 5e3));
       this.registerInterval(window.setInterval(() => this.fetchMod(), 6e4));
+      this.registerInterval(window.setInterval(() => this.checkVersion(), 5 * 60 * 1e3));
       this.onActiveChange();
       this.ensurePresence();
       this.fetchMod();
@@ -12310,7 +12311,7 @@ var UpdateModal = class extends import_obsidian.Modal {
     const { contentEl } = this;
     contentEl.createEl("h3", { text: "\u{1F53A} \uD50C\uB7EC\uADF8\uC778 \uC5C5\uB370\uC774\uD2B8 \uD544\uC694" });
     contentEl.createEl("p", { text: `\uC124\uCE58\uB428 ${this.cur} \u2192 \uCD5C\uC2E0 ${this.latest}. \uBC84\uC804\uC774 \uB2E4\uB974\uBA74 \uB3D9\uAE30\uD654 \uC0AC\uACE0\uAC00 \uB0A0 \uC218 \uC788\uC5B4 \uD3B8\uC9D1\uC744 \uC7A0\uAC14\uC2B5\uB2C8\uB2E4.` });
-    const g = contentEl.createEl("p", { text: "BRAT \u2192 \xABCheck for updates to all beta plugins\xBB \uB85C \uC5C5\uB370\uC774\uD2B8\uD55C \uB4A4 Obsidian \uC744 \uC7AC\uC2DC\uC791\uD558\uC138\uC694." });
+    const g = contentEl.createEl("p", { text: "BRAT \u2192 \xABCheck for updates to all beta plugins\xBB \uB97C \uB204\uB974\uBA74 \uADF8 \uC790\uB9AC\uC11C \uBC18\uC601\uB429\uB2C8\uB2E4(Obsidian \uC7AC\uC2DC\uC791 \uC548 \uD574\uB3C4 \uB429\uB2C8\uB2E4). \uC635\uC2DC\uB514\uC5B8\uC744 \uAED0\uB2E4 \uCF1C\uB3C4 BRAT \uC774 \uC2DC\uC791\uD560 \uB54C \uC54C\uC544\uC11C \uC62C\uB824 \uC90D\uB2C8\uB2E4." });
     g.style.color = "var(--text-muted)";
     const row = contentEl.createDiv();
     row.style.cssText = "display:flex;justify-content:flex-end;margin-top:8px";
