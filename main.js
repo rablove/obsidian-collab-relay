@@ -10376,7 +10376,132 @@ var DEFAULTS = {
 };
 var UPDATE_REPO = "rablove/obsidian-collab-relay";
 var DIAG_DIR = "60_System/_sync-diag";
+var BIN_EXT = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", svg: "image/svg+xml" };
+var BIN_MAX = 2 * 1024 * 1024;
 var nfc = (s) => s.normalize("NFC");
+function md5b64(u8) {
+  const S = [
+    7,
+    12,
+    17,
+    22,
+    7,
+    12,
+    17,
+    22,
+    7,
+    12,
+    17,
+    22,
+    7,
+    12,
+    17,
+    22,
+    5,
+    9,
+    14,
+    20,
+    5,
+    9,
+    14,
+    20,
+    5,
+    9,
+    14,
+    20,
+    5,
+    9,
+    14,
+    20,
+    4,
+    11,
+    16,
+    23,
+    4,
+    11,
+    16,
+    23,
+    4,
+    11,
+    16,
+    23,
+    4,
+    11,
+    16,
+    23,
+    6,
+    10,
+    15,
+    21,
+    6,
+    10,
+    15,
+    21,
+    6,
+    10,
+    15,
+    21,
+    6,
+    10,
+    15,
+    21
+  ];
+  const K = new Int32Array(64);
+  for (let i = 0; i < 64; i++) K[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) | 0;
+  const len = u8.length, nb = (len + 8 >> 6) + 1 << 6;
+  const M = new Uint8Array(nb);
+  M.set(u8);
+  M[len] = 128;
+  const bl = len * 8;
+  M[nb - 8] = bl & 255;
+  M[nb - 7] = bl >>> 8 & 255;
+  M[nb - 6] = bl >>> 16 & 255;
+  M[nb - 5] = bl >>> 24 & 255;
+  let a0 = 1732584193, b0 = 4023233417, c0 = 2562383102, d0 = 271733878;
+  const w = new Int32Array(16);
+  for (let off = 0; off < nb; off += 64) {
+    for (let i = 0; i < 16; i++) {
+      const j = off + i * 4;
+      w[i] = M[j] | M[j + 1] << 8 | M[j + 2] << 16 | M[j + 3] << 24;
+    }
+    let A = a0, B = b0, C = c0, D = d0;
+    for (let i = 0; i < 64; i++) {
+      let F, g;
+      if (i < 16) {
+        F = B & C | ~B & D;
+        g = i;
+      } else if (i < 32) {
+        F = D & B | ~D & C;
+        g = 5 * i + 1 & 15;
+      } else if (i < 48) {
+        F = B ^ C ^ D;
+        g = 3 * i + 5 & 15;
+      } else {
+        F = C ^ (B | ~D);
+        g = 7 * i & 15;
+      }
+      F = F + A + K[i] + w[g] | 0;
+      A = D;
+      D = C;
+      C = B;
+      B = B + (F << S[i] | F >>> 32 - S[i]) | 0;
+    }
+    a0 = a0 + A | 0;
+    b0 = b0 + B | 0;
+    c0 = c0 + C | 0;
+    d0 = d0 + D | 0;
+  }
+  const o = new Uint8Array(16);
+  [a0, b0, c0, d0].forEach((v, i) => {
+    o[i * 4] = v & 255;
+    o[i * 4 + 1] = v >>> 8 & 255;
+    o[i * 4 + 2] = v >>> 16 & 255;
+    o[i * 4 + 3] = v >>> 24 & 255;
+  });
+  let s = "";
+  for (const b of o) s += String.fromCharCode(b);
+  return btoa(s);
+}
 function merge3(baseS, aS, bS) {
   const L = (s) => s.split("\n");
   const lcs = (x, y) => {
@@ -10585,6 +10710,41 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   isMd(f) {
     return f && f.extension === "md";
   }
+  // ⛔ 아래 «그림·캔버스» 관련은 main-db(이 플러그인) 전용이다 — ai-study-sync 에는 «일부러» 넣지 않았다
+  //    (형 지시 2026-08-13: 「ai-study-db는 해당 없으니 main-db에 한해서」). 그래서 두 소스의 차이가
+  //    18줄에서 크게 벌어져 있다. 다음에 두 파일을 맞출 때 여기를 통째로 옮기면 그림·캔버스가
+  //    스터디 공용 볼트(멤버 24명)로 딸려 간다. 옮기기 전에 형에게 확인부터 받아라.
+  binExt(p) {
+    const d = String(p || "").lastIndexOf(".");
+    return d < 0 ? "" : String(p).slice(d + 1).toLowerCase();
+  }
+  isBinPath(p) {
+    return Object.prototype.hasOwnProperty.call(BIN_EXT, this.binExt(p));
+  }
+  isCanvasPath(p) {
+    return String(p || "").endsWith(".canvas");
+  }
+  isTextPath(p) {
+    return String(p || "").endsWith(".md") || this.isCanvasPath(p);
+  }
+  // 본문(content)을 인라인으로 두는 것들
+  isSyncPath(p) {
+    return this.isTextPath(p) || this.isBinPath(p);
+  }
+  // ⭐ 줄 단위 3-way 병합은 .md 에만 쓴다. 캔버스는 JSON 이라 «겹치지 않는 줄»을 합쳐도 구조가 깨질 수 있다.
+  canMerge(p) {
+    return String(p || "").endsWith(".md");
+  }
+  // 그림의 «마지막으로 맞춘 내용»을 해시로 기억한다(.md 의 shadow 와 같은 자리, 값만 해시).
+  //  shadow 와 나눠 둔 이유: shadow 는 3-way 병합의 기준선이라 본문 전체가 필요한데, 그림은 견주기만 하면 된다.
+  _binShadow() {
+    if (!this.__binShadow) this.__binShadow = /* @__PURE__ */ new Map();
+    return this.__binShadow;
+  }
+  attDigest(doc2) {
+    const a = doc2 && doc2._attachments && doc2._attachments.bin;
+    return a && a.digest ? String(a.digest).replace(/^md5-/, "") : null;
+  }
   _ignored(p) {
     return /(^|\/)\./.test(String(p || ""));
   }
@@ -10684,9 +10844,15 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     return this._minDiff(s.ytext, content);
   }
   /* ============ 파일 동기화 (CouchDB) ============ */
-  async req(method, path, body) {
+  //  binMime 이 있으면 «그림(첨부)» — 본문을 JSON 으로 감싸지 않고 날바이트 그대로 주고받는다.
+  //  인증 헤더를 여기 한 자리에서만 만들려고 갈래를 나눴다(같은 줄을 두 벌 두지 않는다).
+  async req(method, path, body, binMime) {
     const base = (this.settings.couchUrl || "").replace(/\/$/, "");
     const headers = { "Authorization": "Basic " + b64(`${this.settings.username}:${this.settings.password}`) };
+    if (binMime) {
+      if (body !== void 0) headers["Content-Type"] = binMime;
+      return (0, import_obsidian.requestUrl)({ url: `${base}/${path}`, method, headers, body, throw: false });
+    }
     if (body !== void 0) headers["Content-Type"] = "application/json";
     return (0, import_obsidian.requestUrl)({ url: `${base}/${path}`, method, headers, body: body !== void 0 ? JSON.stringify(body) : void 0, throw: false });
   }
@@ -10698,6 +10864,26 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   }
   idFor(pNfc) {
     return (this.settings.docPrefix || "") + pNfc;
+  }
+  _ab(u8) {
+    return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+  }
+  // req 의 바이트판 — 첨부는 JSON 이 아니라 날바이트로 오간다.
+  async reqBin(method, path, u8, mime) {
+    return this.req(method, path, u8 ? this._ab(u8) : void 0, mime || "application/octet-stream");
+  }
+  async getBin(path) {
+    try {
+      const r = await this.reqBin("GET", path, null, null);
+      if (r.status !== 200 || !r.arrayBuffer) {
+        console.warn("[sync] \uCCA8\uBD80 \uBC1B\uAE30 \uC2E4\uD328", path, r && r.status);
+        return null;
+      }
+      return new Uint8Array(r.arrayBuffer);
+    } catch (e) {
+      console.error("[sync] getBin", path, e);
+      return null;
+    }
   }
   async testConnection() {
     if (!this.settings.couchUrl) return { ok: false, msg: "CouchDB URL \uC744 \uC785\uB825\uD558\uC138\uC694" };
@@ -10713,8 +10899,13 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
   }
   async onLocal(file) {
-    if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured() || !this.isMd(file) || this._ignored(file.path)) return;
+    if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured() || !file || this._ignored(file.path)) return;
     const p = nfc(file.path);
+    if (this.isBinPath(p)) {
+      await this.onLocalBin(p, file.stat && file.stat.mtime || Date.now());
+      return;
+    }
+    if (!this.isMd(file) && !this.isCanvasPath(p)) return;
     if (p === this.collabPath) {
       await this.collabAbsorb(p);
       return;
@@ -10729,16 +10920,20 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     await this.upsert(p, content, file.stat && file.stat.mtime || Date.now());
   }
   async onLocalDelete(rawPath) {
-    if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured() || !rawPath.endsWith(".md") || this._ignored(rawPath)) return;
+    if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured() || !this.isSyncPath(rawPath) || this._ignored(rawPath)) return;
     const p = nfc(rawPath);
     if (p === this.collabPath) return;
     this.shadow.delete(p);
+    this._binShadow().delete(p);
     await this.markDeleted(p);
   }
   async onLocalRename(file, oldPath) {
     if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured()) return;
-    if (oldPath.endsWith(".md") && !this._ignored(oldPath)) await this.markDeleted(nfc(oldPath));
-    if (this.isMd(file)) await this.onLocal(file);
+    if (this.isSyncPath(oldPath) && !this._ignored(oldPath)) {
+      this._binShadow().delete(nfc(oldPath));
+      await this.markDeleted(nfc(oldPath));
+    }
+    if (file && this.isSyncPath(file.path)) await this.onLocal(file);
   }
   async putDoc(pNfc, content, mtime) {
     if (this._outdated) return false;
@@ -10770,7 +10965,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
           await this.saveConflictCopy(pNfc, server.content, server.mtime || Date.now(), "server");
         }
       } else if (server && !server.deleted && server.content !== void 0 && server.content !== content && base !== void 0 && server.content !== base) {
-        const merged = merge3(base, content, server.content);
+        const merged = this.canMerge(pNfc) ? merge3(base, content, server.content) : null;
         if (merged !== null) {
           await this.writeLocal(pNfc, merged);
           this.shadow.set(pNfc, merged);
@@ -11026,7 +11221,9 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   async applyRemote(doc2) {
     const _pfx = this.settings.docPrefix || "";
     const p = doc2.path || (doc2._id && doc2._id.indexOf(_pfx) === 0 ? doc2._id.slice(_pfx.length) : doc2._id);
-    if (!p.endsWith(".md") || this._ignored(p)) return false;
+    if (this._ignored(p)) return false;
+    if (this.isBinPath(p)) return this.applyRemoteBin(doc2, p);
+    if (!this.isTextPath(p)) return false;
     if (nfc(p) === this.collabPath) return false;
     const R = doc2.content || "";
     try {
@@ -11078,7 +11275,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       }
       const st = await this.app.vault.adapter.stat(p);
       const lm = st ? st.mtime : 0;
-      const merged = merge3(base, local, R);
+      const merged = this.canMerge(p) ? merge3(base, local, R) : null;
       if (merged !== null) {
         await this.writeLocal(p, merged);
         this.shadow.set(p, merged);
@@ -11110,6 +11307,157 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       console.error("[sync] applyRemote", p, e);
       return false;
     }
+  }
+  /* ⛔ main-db 전용 — ai-study-sync 에는 일부러 안 넣었다(형 지시 2026-08-13). 위 머리말 참고.
+     ── 그림(첨부) 동기화 ────────────────────────────────────────────────
+     .md 와 다른 점 셋:
+      ① 합칠 수 없다 → 3-way 병합·부분집합 판정을 안 쓴다. «같으면 그대로, 다르면 최신(mtime) 승».
+      ② 견주기는 «해시»로 한다(수정시각 아님). 받아 쓴 파일은 로컬 mtime 이 «지금»이 되므로
+         수정시각만 보면 늘 로컬이 새 것 → 받은 그림을 되올리고 그걸 받은 기기가 또 되올린다.
+      ③ 마지막으로 맞춘 해시(_binShadow) 대비 양쪽 다 바뀌었을 때만 사본을 남긴다 — 첫 대면엔 안 남긴다
+         (.md 의 «첫 대면은 충돌 아님» 규칙과 같다). */
+  // 서버 첨부를 받아 로컬에 쓴다. 상한 초과·해시 불일치면 조용히 넘기지 않고 콘솔에 남긴다.
+  async pullBinTo(p, doc2) {
+    const a = (doc2._attachments || {}).bin;
+    if (!a) return false;
+    if ((a.length || 0) > BIN_MAX) {
+      console.warn(`[sync] \uC11C\uBC84 \uADF8\uB9BC\uC774 \uC0C1\uD55C \uCD08\uACFC \u2014 \uC548 \uBC1B\uC74C: ${p} (${a.length} > ${BIN_MAX} \uBC14\uC774\uD2B8)`);
+      return false;
+    }
+    const dig = this.attDigest(doc2);
+    const got = await this.getBin(this.docUrl(this.idFor(nfc(p))) + "/bin");
+    if (!got) {
+      console.warn("[sync] \uADF8\uB9BC \uBC1B\uAE30 \uC2E4\uD328 \u2014 \uC548 \uC500:", p);
+      return false;
+    }
+    if (dig && md5b64(got) !== dig) {
+      console.warn("[sync] \uBC1B\uC740 \uADF8\uB9BC \uD574\uC2DC \uBD88\uC77C\uCE58 \u2014 \uC548 \uC500:", p);
+      return false;
+    }
+    await this.writeLocalBin(p, got);
+    this._binShadow().set(nfc(p), dig || md5b64(got));
+    return true;
+  }
+  async putBin(pNfc, u8, mtime) {
+    if (this._outdated) return false;
+    if (u8.length > BIN_MAX) {
+      console.warn(`[sync] \uADF8\uB9BC\uC774 \uC0C1\uD55C \uCD08\uACFC \u2014 \uC548 \uC62C\uB9BC: ${pNfc} (${u8.length} > ${BIN_MAX} \uBC14\uC774\uD2B8)`);
+      new import_obsidian.Notice(`\u26A0\uFE0F \uADF8\uB9BC\uC774 \uCEE4\uC11C \uB3D9\uAE30\uD654 \uC548 \uD568 (${(u8.length / 1048576).toFixed(1)}MB > 2MB): ${pNfc.split("/").pop()}`, 8e3);
+      return false;
+    }
+    const id2 = this.idFor(pNfc);
+    const mime = BIN_EXT[this.binExt(pNfc)] || "application/octet-stream";
+    const cur = await this.req("GET", this.docUrl(id2));
+    const doc2 = { _id: id2, path: pNfc, binary: true, size: u8.length, mime, mtime, deleted: false, lastEditor: this.settings.username, clientVersion: this.manifest.version };
+    if (cur.status === 200 && cur.json && cur.json._rev) doc2._rev = cur.json._rev;
+    const put = await this.req("PUT", this.docUrl(id2), doc2);
+    if (put.status !== 200 && put.status !== 201) {
+      console.warn("[sync] \uADF8\uB9BC \uBB38\uC11C \uC62C\uB9AC\uAE30 \uC2E4\uD328", pNfc, put.status);
+      return false;
+    }
+    const rev = put.json && (put.json.rev || put.json._rev);
+    const att = await this.reqBin("PUT", `${this.docUrl(id2)}/bin?rev=${encodeURIComponent(rev)}`, u8, mime);
+    if (att.status !== 200 && att.status !== 201) {
+      console.error("[sync] \uADF8\uB9BC \uCCA8\uBD80 \uC62C\uB9AC\uAE30 \uC2E4\uD328", pNfc, att.status);
+      return false;
+    }
+    this._binShadow().set(pNfc, md5b64(u8));
+    return true;
+  }
+  async onLocalBin(pNfc, mtime) {
+    try {
+      let u8;
+      try {
+        u8 = await this.readBin(pNfc);
+      } catch (e) {
+        return;
+      }
+      const dig = md5b64(u8);
+      if (this._binShadow().get(pNfc) === dig) return;
+      const cur = await this.req("GET", this.docUrl(this.idFor(pNfc)));
+      const server = cur.status === 200 && cur.json ? cur.json : null;
+      if (server && !server.deleted) {
+        const sDig = this.attDigest(server);
+        if (sDig === dig) {
+          this._binShadow().set(pNfc, dig);
+          return;
+        }
+        const base = this._binShadow().get(pNfc);
+        if (sDig && base !== void 0 && base !== sDig) {
+          const srv = await this.getBin(this.docUrl(this.idFor(pNfc)) + "/bin");
+          if (srv) await this.saveBinConflictCopy(pNfc, srv, server.mtime || Date.now(), "server");
+        }
+      }
+      await this.putBin(pNfc, u8, mtime);
+    } catch (e) {
+      console.error("[sync] onLocalBin", pNfc, e);
+    }
+  }
+  async applyRemoteBin(doc2, p) {
+    const pNfc = nfc(p);
+    try {
+      const exists = await this.app.vault.adapter.exists(p);
+      if (doc2.deleted || doc2._deleted) {
+        if (exists) {
+          this.applying = true;
+          try {
+            const af = this.app.vault.getAbstractFileByPath(p);
+            if (af) await this.app.vault.trash(af, false);
+            else await this.app.vault.adapter.remove(p);
+          } finally {
+            this.applying = false;
+          }
+          await this.pruneEmptyParents(p);
+        }
+        this._binShadow().delete(pNfc);
+        return exists;
+      }
+      const dig = this.attDigest(doc2);
+      if (!dig) return false;
+      if (!exists) return await this.pullBinTo(p, doc2);
+      let local;
+      try {
+        local = await this.readBin(p);
+      } catch (e) {
+        return false;
+      }
+      const lDig = md5b64(local);
+      if (lDig === dig) {
+        this._binShadow().set(pNfc, dig);
+        return false;
+      }
+      const base = this._binShadow().get(pNfc);
+      if (base === lDig) return await this.pullBinTo(p, doc2);
+      const st = await this.app.vault.adapter.stat(p);
+      const lm = st && st.mtime || 0;
+      if (base === dig) {
+        await this.putBin(pNfc, local, lm);
+        return true;
+      }
+      if (base !== void 0) {
+        if ((doc2.mtime || 0) >= lm) await this.saveBinConflictCopy(pNfc, local, lm, this.settings.deviceId || "local");
+        else {
+          const srv = await this.getBin(this.docUrl(this.idFor(pNfc)) + "/bin");
+          if (srv) await this.saveBinConflictCopy(pNfc, srv, doc2.mtime || 0, "server");
+        }
+      }
+      if ((doc2.mtime || 0) >= lm) return await this.pullBinTo(p, doc2);
+      await this.putBin(pNfc, local, lm);
+      return true;
+    } catch (e) {
+      console.error("[sync] applyRemoteBin", p, e);
+      return false;
+    }
+  }
+  async saveBinConflictCopy(pNfc, u8, mtime, tag) {
+    const dot = pNfc.lastIndexOf(".");
+    const ext = dot > 0 ? pNfc.slice(dot) : "";
+    const bare = dot > 0 ? pNfc.slice(0, dot) : pNfc;
+    const cp = `${bare} (\uCDA9\uB3CC ${tag} ${this.tstamp()})${ext}`;
+    await this.writeLocalBin(cp, u8);
+    this._binShadow().set(cp, md5b64(u8));
+    await this.putBin(cp, u8, mtime);
+    new import_obsidian.Notice(`\u26A0\uFE0F \uADF8\uB9BC \uCDA9\uB3CC \u2014 \uC0AC\uBCF8 \uBCF4\uAD00: ${cp.split("/").pop()}`);
   }
   async pruneEmptyParents(filePath) {
     let dir = filePath.split("/").slice(0, -1).join("/");
@@ -11152,6 +11500,20 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       await this.app.vault.adapter.write(p, content);
     } finally {
       this.applying = false;
+    }
+  }
+  async readBin(p) {
+    return new Uint8Array(await this.app.vault.adapter.readBinary(p));
+  }
+  // applying 을 «되돌려» 놓는다(false 로 못박지 않는다) — hardReset 처럼 이미 applying 인 채로 부르는 자리가 있다.
+  async writeLocalBin(p, u8) {
+    await this.ensureParent(p);
+    const was = this.applying;
+    this.applying = true;
+    try {
+      await this.app.vault.adapter.writeBinary(p, this._ab(u8));
+    } finally {
+      this.applying = was;
     }
   }
   tstamp() {
@@ -11248,9 +11610,11 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       new import_obsidian.Notice("\uBA3C\uC800 \uC124\uC815\uC744 \uCC44\uC6B0\uC138\uC694");
       return;
     }
-    const files = this.app.vault.getMarkdownFiles();
-    new import_obsidian.Notice(`\uC5C5\uB85C\uB4DC \uC2DC\uC791 ${files.length}\uAC1C\u2026`);
-    let ok = 0;
+    const all2 = this.app.vault.getFiles ? this.app.vault.getFiles() : [];
+    const files = this.app.vault.getMarkdownFiles().concat(all2.filter((f) => this.isCanvasPath(f.path) && !this._ignored(f.path)));
+    const bins = all2.filter((f) => this.isBinPath(f.path) && !this._ignored(f.path));
+    new import_obsidian.Notice(`\uC5C5\uB85C\uB4DC \uC2DC\uC791 \u2014 \uB178\uD2B8\xB7\uCE94\uBC84\uC2A4 ${files.length}\uAC1C \xB7 \uADF8\uB9BC ${bins.length}\uAC1C\u2026`);
+    let ok = 0, bok = 0;
     for (const f of files) {
       try {
         const content = await this.app.vault.adapter.read(f.path);
@@ -11259,7 +11623,14 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       } catch (e) {
       }
     }
-    new import_obsidian.Notice(`\uC5C5\uB85C\uB4DC \uC644\uB8CC ${ok}/${files.length}`);
+    for (const f of bins) {
+      try {
+        await this.onLocalBin(nfc(f.path), f.stat && f.stat.mtime || Date.now());
+        bok++;
+      } catch (e) {
+      }
+    }
+    new import_obsidian.Notice(`\uC5C5\uB85C\uB4DC \uC644\uB8CC \u2014 \uB178\uD2B8 ${ok}/${files.length} \xB7 \uADF8\uB9BC ${bok}/${bins.length}`);
   }
   // 처음부터 다시 받기(하드 리셋): 로컬 .md 를 전부 지우고 서버본으로 통째 갈아엎는다.
   // 안전 순서 — ①서버 전체를 먼저 받아온다(실패하면 로컬은 손대지 않음) → ②로컬 .md 삭제 → ③서버본 기록.
@@ -11339,15 +11710,27 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         }
       }
       this.shadow.clear();
+      this._binShadow().clear();
+      const bins = [];
       for (const d of docs) {
         if (d.deleted || d._deleted) continue;
         const p = d.path || d._id.slice(prefix.length);
-        if (!p.endsWith(".md")) continue;
+        if (this.isBinPath(p)) {
+          bins.push([p, d]);
+          continue;
+        }
+        if (!this.isTextPath(p)) continue;
         try {
           await this.ensureParent(p);
           await this.app.vault.adapter.write(p, d.content || "");
           this.shadow.set(p, d.content || "");
           wr++;
+        } catch (e) {
+        }
+      }
+      for (const [p, d] of bins) {
+        try {
+          if (await this.pullBinTo(p, d)) wr++;
         } catch (e) {
         }
       }

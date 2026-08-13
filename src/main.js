@@ -31,7 +31,52 @@ const UPDATE_REPO = 'rablove/obsidian-collab-relay';   // 버전 확인 대상(�
 // 충돌 진단 레코드를 모아 두는 서버상의 자리. 경로가 `.md` 로 끝나지 않아 applyRemote 가 걸러내므로
 // 어느 기기에도 파일로 내려가지 않는다(진단 전용). 읽기·집계는 하네스 `conflicts.py events`.
 const DIAG_DIR = '60_System/_sync-diag';
+// ⛔ 아래 «그림·캔버스» 관련은 main-db(이 플러그인) 전용이다 — ai-study-sync 에는 «일부러» 넣지 않았다
+//    (형 지시 2026-08-13: 「ai-study-db는 해당 없으니 main-db에 한해서」). 그래서 두 소스의 차이가
+//    18줄에서 크게 벌어져 있다. 다음에 두 파일을 맞출 때 여기를 통째로 옮기면 그림·캔버스가
+//    스터디 공용 볼트(멤버 24명)로 딸려 간다. 옮기기 전에 형에게 확인부터 받아라.
+// 그림 파일도 노트와 같은 cvs: 문서로 동기화한다. 본문(content)에 base64 로 넣지 않고
+// CouchDB 첨부(_attachments.bin)로 두는 이유: _changes·_all_docs 는 첨부를 «stub»(digest·length)
+// 로만 실어 준다. base64 를 content 에 넣으면 그 덩어리가 변경마다 모든 기기로 흐르고,
+// 전체 확인은 50개씩 묶어 받으므로 한 응답이 수십 MB 가 된다.
+const BIN_EXT = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', svg: 'image/svg+xml' };
+const BIN_MAX = 2 * 1024 * 1024;   // 파일 하나 상한. 넘으면 «조용히» 넘기지 않고 콘솔+알림에 남긴다.
 const nfc = (s) => s.normalize('NFC');
+// CouchDB 첨부의 digest 는 md5 다. 로컬 바이트와 그걸 견주려면 md5 가 필요한데
+// crypto.subtle 은 SHA 만 준다. 이 비교가 서야 «같으면 아무것도 안 한다»가 성립하고,
+// 그래야 받아 쓴 그림을 곧바로 되올리는 되풀이가 안 생긴다(받아 쓰면 로컬 mtime 이 늘 «지금»이라
+// 수정시각만 보면 언제나 로컬이 새 것으로 보인다).
+function md5b64(u8) {
+  const S = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22, 5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
+             4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23, 6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21];
+  const K = new Int32Array(64);
+  for (let i = 0; i < 64; i++) K[i] = (Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296)) | 0;
+  const len = u8.length, nb = (((len + 8) >> 6) + 1) << 6;
+  const M = new Uint8Array(nb); M.set(u8); M[len] = 0x80;
+  const bl = len * 8;   // 상한(BIN_MAX)이 있어 비트길이가 2^32 를 넘지 않는다
+  M[nb-8] = bl & 0xff; M[nb-7] = (bl >>> 8) & 0xff; M[nb-6] = (bl >>> 16) & 0xff; M[nb-5] = (bl >>> 24) & 0xff;
+  let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+  const w = new Int32Array(16);
+  for (let off = 0; off < nb; off += 64) {
+    for (let i = 0; i < 16; i++) { const j = off + i*4; w[i] = M[j] | (M[j+1]<<8) | (M[j+2]<<16) | (M[j+3]<<24); }
+    let A = a0, B = b0, C = c0, D = d0;
+    for (let i = 0; i < 64; i++) {
+      let F, g;
+      if (i < 16) { F = (B & C) | (~B & D); g = i; }
+      else if (i < 32) { F = (D & B) | (~D & C); g = (5*i + 1) & 15; }
+      else if (i < 48) { F = B ^ C ^ D; g = (3*i + 5) & 15; }
+      else { F = C ^ (B | ~D); g = (7*i) & 15; }
+      F = (F + A + K[i] + w[g]) | 0;
+      A = D; D = C; C = B;
+      B = (B + ((F << S[i]) | (F >>> (32 - S[i])))) | 0;
+    }
+    a0 = (a0+A)|0; b0 = (b0+B)|0; c0 = (c0+C)|0; d0 = (d0+D)|0;
+  }
+  const o = new Uint8Array(16);
+  [a0,b0,c0,d0].forEach((v,i) => { o[i*4]=v&0xff; o[i*4+1]=(v>>>8)&0xff; o[i*4+2]=(v>>>16)&0xff; o[i*4+3]=(v>>>24)&0xff; });
+  let s = ''; for (const b of o) s += String.fromCharCode(b);
+  return btoa(s);
+}
 // 3-way 병합: base(공통기준)·A(로컬)·B(서버). 겹치지 않는 편집은 합치고, 같은 지점 삽입은 결정적 순서로 둘 다 보존.
 //  같은 줄을 서로 다르게 고친 «진짜 충돌」이거나 안전검증 실패면 null → 호출부가 기존(사본) 처리로 폴백.
 function merge3(baseS, aS, bS) {
@@ -147,6 +192,21 @@ export default class VaultSyncCollab extends Plugin {
   setCollab(s) { if (this.collabEl) this.collabEl.setText('👥 ' + s); }
   configured() { return this.settings.enabled && this.settings.couchUrl && this.settings.dbName && this.settings.username; }
   isMd(f) { return f && f.extension === 'md'; }
+  // ⛔ 아래 «그림·캔버스» 관련은 main-db(이 플러그인) 전용이다 — ai-study-sync 에는 «일부러» 넣지 않았다
+  //    (형 지시 2026-08-13: 「ai-study-db는 해당 없으니 main-db에 한해서」). 그래서 두 소스의 차이가
+  //    18줄에서 크게 벌어져 있다. 다음에 두 파일을 맞출 때 여기를 통째로 옮기면 그림·캔버스가
+  //    스터디 공용 볼트(멤버 24명)로 딸려 간다. 옮기기 전에 형에게 확인부터 받아라.
+  binExt(p) { const d = String(p || '').lastIndexOf('.'); return d < 0 ? '' : String(p).slice(d + 1).toLowerCase(); }
+  isBinPath(p) { return Object.prototype.hasOwnProperty.call(BIN_EXT, this.binExt(p)); }
+  isCanvasPath(p) { return String(p || '').endsWith('.canvas'); }
+  isTextPath(p) { return String(p || '').endsWith('.md') || this.isCanvasPath(p); }   // 본문(content)을 인라인으로 두는 것들
+  isSyncPath(p) { return this.isTextPath(p) || this.isBinPath(p); }
+  // ⭐ 줄 단위 3-way 병합은 .md 에만 쓴다. 캔버스는 JSON 이라 «겹치지 않는 줄»을 합쳐도 구조가 깨질 수 있다.
+  canMerge(p) { return String(p || '').endsWith('.md'); }
+  // 그림의 «마지막으로 맞춘 내용»을 해시로 기억한다(.md 의 shadow 와 같은 자리, 값만 해시).
+  //  shadow 와 나눠 둔 이유: shadow 는 3-way 병합의 기준선이라 본문 전체가 필요한데, 그림은 견주기만 하면 된다.
+  _binShadow() { if (!this.__binShadow) this.__binShadow = new Map(); return this.__binShadow; }
+  attDigest(doc) { const a = doc && doc._attachments && doc._attachments.bin; return a && a.digest ? String(a.digest).replace(/^md5-/, '') : null; }
   _ignored(p) { return /(^|\/)\./.test(String(p || '')); }   // .trash/·.obsidian/ 등 숨김폴더 경로는 동기화 제외 — 삭제본이 되살아나거나 cvs:.trash/… 엉뚱한 문서 생기는 것 방지
   // 두 내용 중 하나가 다른 하나를 «온전히 포함»(가운데 삽입만 차이)하면 그 상위집합을 알려준다. 진짜 분기면 null → 사본 유지.
   _relate(a, b) {
@@ -211,15 +271,33 @@ export default class VaultSyncCollab extends Plugin {
   }
 
   /* ============ 파일 동기화 (CouchDB) ============ */
-  async req(method, path, body) {
+  //  binMime 이 있으면 «그림(첨부)» — 본문을 JSON 으로 감싸지 않고 날바이트 그대로 주고받는다.
+  //  인증 헤더를 여기 한 자리에서만 만들려고 갈래를 나눴다(같은 줄을 두 벌 두지 않는다).
+  async req(method, path, body, binMime) {
     const base = (this.settings.couchUrl || '').replace(/\/$/, '');
     const headers = { 'Authorization': 'Basic ' + b64(`${this.settings.username}:${this.settings.password}`) };
+    if (binMime) {
+      if (body !== undefined) headers['Content-Type'] = binMime;
+      return requestUrl({ url: `${base}/${path}`, method, headers, body, throw: false });
+    }
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     return requestUrl({ url: `${base}/${path}`, method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, throw: false });
   }
   dbPath(p) { return `${encodeURIComponent(this.settings.dbName)}/${p}`; }
   docUrl(id) { return this.dbPath(encodeURIComponent(id)); }
   idFor(pNfc) { return (this.settings.docPrefix || '') + pNfc; }
+  _ab(u8) { return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength); }
+  // req 의 바이트판 — 첨부는 JSON 이 아니라 날바이트로 오간다.
+  async reqBin(method, path, u8, mime) {
+    return this.req(method, path, u8 ? this._ab(u8) : undefined, mime || 'application/octet-stream');
+  }
+  async getBin(path) {
+    try {
+      const r = await this.reqBin('GET', path, null, null);
+      if (r.status !== 200 || !r.arrayBuffer) { console.warn('[sync] 첨부 받기 실패', path, r && r.status); return null; }
+      return new Uint8Array(r.arrayBuffer);
+    } catch (e) { console.error('[sync] getBin', path, e); return null; }
+  }
 
   async testConnection() {
     if (!this.settings.couchUrl) return { ok: false, msg: 'CouchDB URL 을 입력하세요' };
@@ -234,22 +312,24 @@ export default class VaultSyncCollab extends Plugin {
   }
 
   async onLocal(file) {
-    if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured() || !this.isMd(file) || this._ignored(file.path)) return;
+    if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured() || !file || this._ignored(file.path)) return;
     const p = nfc(file.path);
+    if (this.isBinPath(p)) { await this.onLocalBin(p, (file.stat && file.stat.mtime) || Date.now()); return; }   // 그림 — 합치지 않고 통째로
+    if (!this.isMd(file) && !this.isCanvasPath(p)) return;
     if (p === this.collabPath) { await this.collabAbsorb(p); return; }   // 협업 중인 노트는 relay 가 처리 (겹침 방지) — 단 «에디터를 안 거친» 파일 변경은 Y.Doc 에 넣어준다
     let content; try { content = await this.app.vault.adapter.read(file.path); } catch (e) { return; }
     if (this.shadow.get(p) === content) return;
     await this.upsert(p, content, (file.stat && file.stat.mtime) || Date.now());
   }
   async onLocalDelete(rawPath) {
-    if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured() || !rawPath.endsWith('.md') || this._ignored(rawPath)) return;
+    if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured() || !this.isSyncPath(rawPath) || this._ignored(rawPath)) return;
     const p = nfc(rawPath); if (p === this.collabPath) return;
-    this.shadow.delete(p); await this.markDeleted(p);
+    this.shadow.delete(p); this._binShadow().delete(p); await this.markDeleted(p);
   }
   async onLocalRename(file, oldPath) {
     if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured()) return;
-    if (oldPath.endsWith('.md') && !this._ignored(oldPath)) await this.markDeleted(nfc(oldPath));
-    if (this.isMd(file)) await this.onLocal(file);   // onLocal 이 .trash 경로는 알아서 무시
+    if (this.isSyncPath(oldPath) && !this._ignored(oldPath)) { this._binShadow().delete(nfc(oldPath)); await this.markDeleted(nfc(oldPath)); }
+    if (file && this.isSyncPath(file.path)) await this.onLocal(file);   // onLocal 이 .trash 경로는 알아서 무시
   }
 
   async putDoc(pNfc, content, mtime) {
@@ -278,7 +358,7 @@ export default class VaultSyncCollab extends Plugin {
           await this.saveConflictCopy(pNfc, server.content, server.mtime || Date.now(), 'server');
         }
       } else if (server && !server.deleted && server.content !== undefined && server.content !== content && base !== undefined && server.content !== base) {
-        const merged = merge3(base, content, server.content);   // 3-way 병합 — 겹치지 않으면 사본 없이 합침
+        const merged = this.canMerge(pNfc) ? merge3(base, content, server.content) : null;   // 3-way 병합 — 겹치지 않으면 사본 없이 합침 (.md 만: 캔버스는 JSON 이라 못 합친다)
         if (merged !== null) { await this.writeLocal(pNfc, merged); this.shadow.set(pNfc, merged); await this.putDoc(pNfc, merged, Math.max(mtime, server.mtime || 0)); return; }
         const rel = this._relate(content, server.content);   // 병합 불가 → 사소한 포함관계면 상위집합
         if (rel === 'b') { await this.writeLocal(pNfc, server.content); this.shadow.set(pNfc, server.content); return; }   // 서버가 상위집합 → 서버본
@@ -420,7 +500,9 @@ export default class VaultSyncCollab extends Plugin {
     // 삭제 tombstone 은 path 가 없다 → _id 에서 접두어(cvs:)를 벗겨 실제 로컬 경로를 얻는다.
     const _pfx = this.settings.docPrefix || '';
     const p = doc.path || ((doc._id && doc._id.indexOf(_pfx) === 0) ? doc._id.slice(_pfx.length) : doc._id);
-    if (!p.endsWith('.md') || this._ignored(p)) return false;
+    if (this._ignored(p)) return false;
+    if (this.isBinPath(p)) return this.applyRemoteBin(doc, p);   // 그림 — 첨부(bin)를 따로 받아 통째로
+    if (!this.isTextPath(p)) return false;
     if (nfc(p) === this.collabPath) return false;   // 협업 중인 노트 → relay(Yjs)가 소유, 건드리지 않음
     const R = doc.content || '';
     try {
@@ -446,7 +528,7 @@ export default class VaultSyncCollab extends Plugin {
       if (local === base) { await this.writeLocal(p, R); this.shadow.set(p, R); return true; }  // 서버만 바뀜 → 서버로
       // 기준선 대비 양쪽 다 바뀜 → 진짜 동시편집 충돌 → 사본 보관
       const st = await this.app.vault.adapter.stat(p); const lm = st ? st.mtime : 0;
-      const merged = merge3(base, local, R);   // 3-way 병합 — 겹치지 않으면 사본 없이 합침(양쪽 보존·수렴)
+      const merged = this.canMerge(p) ? merge3(base, local, R) : null;   // 3-way 병합 — 겹치지 않으면 사본 없이 합침(양쪽 보존·수렴). 캔버스는 JSON 이라 안 합친다 → 아래 최신 승 + 사본
       if (merged !== null) {
         await this.writeLocal(p, merged); this.shadow.set(p, merged);
         if (merged !== R) await this.putDoc(p, merged, Math.max(lm, doc.mtime || 0));   // 서버도 병합본으로
@@ -460,6 +542,103 @@ export default class VaultSyncCollab extends Plugin {
       else { await this.saveConflictCopy(p, R, doc.mtime || 0, 'server'); await this.putDoc(p, local, lm); }
       return true;
     } catch (e) { console.error('[sync] applyRemote', p, e); return false; }
+  }
+  /* ⛔ main-db 전용 — ai-study-sync 에는 일부러 안 넣었다(형 지시 2026-08-13). 위 머리말 참고.
+     ── 그림(첨부) 동기화 ────────────────────────────────────────────────
+     .md 와 다른 점 셋:
+      ① 합칠 수 없다 → 3-way 병합·부분집합 판정을 안 쓴다. «같으면 그대로, 다르면 최신(mtime) 승».
+      ② 견주기는 «해시»로 한다(수정시각 아님). 받아 쓴 파일은 로컬 mtime 이 «지금»이 되므로
+         수정시각만 보면 늘 로컬이 새 것 → 받은 그림을 되올리고 그걸 받은 기기가 또 되올린다.
+      ③ 마지막으로 맞춘 해시(_binShadow) 대비 양쪽 다 바뀌었을 때만 사본을 남긴다 — 첫 대면엔 안 남긴다
+         (.md 의 «첫 대면은 충돌 아님» 규칙과 같다). */
+  // 서버 첨부를 받아 로컬에 쓴다. 상한 초과·해시 불일치면 조용히 넘기지 않고 콘솔에 남긴다.
+  async pullBinTo(p, doc) {
+    const a = (doc._attachments || {}).bin;
+    if (!a) return false;
+    if ((a.length || 0) > BIN_MAX) { console.warn(`[sync] 서버 그림이 상한 초과 — 안 받음: ${p} (${a.length} > ${BIN_MAX} 바이트)`); return false; }
+    const dig = this.attDigest(doc);
+    const got = await this.getBin(this.docUrl(this.idFor(nfc(p))) + '/bin');
+    if (!got) { console.warn('[sync] 그림 받기 실패 — 안 씀:', p); return false; }
+    if (dig && md5b64(got) !== dig) { console.warn('[sync] 받은 그림 해시 불일치 — 안 씀:', p); return false; }
+    await this.writeLocalBin(p, got);
+    this._binShadow().set(nfc(p), dig || md5b64(got));
+    return true;
+  }
+  async putBin(pNfc, u8, mtime) {
+    if (this._outdated) return false;   // 구버전이면 pull-only (.md 와 같다)
+    if (u8.length > BIN_MAX) {
+      console.warn(`[sync] 그림이 상한 초과 — 안 올림: ${pNfc} (${u8.length} > ${BIN_MAX} 바이트)`);
+      new Notice(`⚠️ 그림이 커서 동기화 안 함 (${(u8.length / 1048576).toFixed(1)}MB > 2MB): ${pNfc.split('/').pop()}`, 8000);
+      return false;
+    }
+    const id = this.idFor(pNfc);
+    const mime = BIN_EXT[this.binExt(pNfc)] || 'application/octet-stream';
+    const cur = await this.req('GET', this.docUrl(id));
+    const doc = { _id: id, path: pNfc, binary: true, size: u8.length, mime, mtime, deleted: false, lastEditor: this.settings.username, clientVersion: this.manifest.version };
+    if (cur.status === 200 && cur.json && cur.json._rev) doc._rev = cur.json._rev;
+    const put = await this.req('PUT', this.docUrl(id), doc);
+    if (put.status !== 200 && put.status !== 201) { console.warn('[sync] 그림 문서 올리기 실패', pNfc, put.status); return false; }
+    const rev = put.json && (put.json.rev || put.json._rev);
+    const att = await this.reqBin('PUT', `${this.docUrl(id)}/bin?rev=${encodeURIComponent(rev)}`, u8, mime);
+    if (att.status !== 200 && att.status !== 201) { console.error('[sync] 그림 첨부 올리기 실패', pNfc, att.status); return false; }
+    this._binShadow().set(pNfc, md5b64(u8));
+    return true;
+  }
+  async onLocalBin(pNfc, mtime) {
+    try {
+      let u8; try { u8 = await this.readBin(pNfc); } catch (e) { return; }
+      const dig = md5b64(u8);
+      if (this._binShadow().get(pNfc) === dig) return;   // 방금 받아 쓴 것의 메아리
+      const cur = await this.req('GET', this.docUrl(this.idFor(pNfc)));
+      const server = (cur.status === 200 && cur.json) ? cur.json : null;
+      if (server && !server.deleted) {
+        const sDig = this.attDigest(server);
+        if (sDig === dig) { this._binShadow().set(pNfc, dig); return; }   // 서버도 같은 그림 → 올릴 것 없음
+        const base = this._binShadow().get(pNfc);
+        if (sDig && base !== undefined && base !== sDig) {   // 내가 마지막으로 맞춘 뒤 서버도 바뀌었다 → 서버본 보관
+          const srv = await this.getBin(this.docUrl(this.idFor(pNfc)) + '/bin');
+          if (srv) await this.saveBinConflictCopy(pNfc, srv, server.mtime || Date.now(), 'server');
+        }
+      }
+      await this.putBin(pNfc, u8, mtime);
+    } catch (e) { console.error('[sync] onLocalBin', pNfc, e); }
+  }
+  async applyRemoteBin(doc, p) {
+    const pNfc = nfc(p);
+    try {
+      const exists = await this.app.vault.adapter.exists(p);
+      if (doc.deleted || doc._deleted) {
+        if (exists) {
+          this.applying = true;
+          try { const af = this.app.vault.getAbstractFileByPath(p); if (af) await this.app.vault.trash(af, false); else await this.app.vault.adapter.remove(p); }
+          finally { this.applying = false; }
+          await this.pruneEmptyParents(p);
+        }
+        this._binShadow().delete(pNfc); return exists;
+      }
+      const dig = this.attDigest(doc);
+      if (!dig) return false;                      // 첨부가 아직 안 올라온 문서(만들다 만 것) — 손대지 않는다
+      if (!exists) return await this.pullBinTo(p, doc);
+      let local; try { local = await this.readBin(p); } catch (e) { return false; }
+      const lDig = md5b64(local);
+      if (lDig === dig) { this._binShadow().set(pNfc, dig); return false; }   // 이미 같다 → 아무 일도 안 한다
+      const base = this._binShadow().get(pNfc);
+      if (base === lDig) return await this.pullBinTo(p, doc);                  // 로컬은 그대로, 서버만 바뀜 → 서버본
+      const st = await this.app.vault.adapter.stat(p); const lm = (st && st.mtime) || 0;
+      if (base === dig) { await this.putBin(pNfc, local, lm); return true; }   // 서버는 그대로, 로컬만 바뀜 → 올린다
+      if (base !== undefined) {   // 마지막으로 맞춘 것 대비 양쪽 다 바뀜 → 진 쪽을 사본으로 (아무것도 안 잃는다)
+        if ((doc.mtime || 0) >= lm) await this.saveBinConflictCopy(pNfc, local, lm, this.settings.deviceId || 'local');
+        else { const srv = await this.getBin(this.docUrl(this.idFor(pNfc)) + '/bin'); if (srv) await this.saveBinConflictCopy(pNfc, srv, doc.mtime || 0, 'server'); }
+      }
+      if ((doc.mtime || 0) >= lm) return await this.pullBinTo(p, doc);
+      await this.putBin(pNfc, local, lm); return true;
+    } catch (e) { console.error('[sync] applyRemoteBin', p, e); return false; }
+  }
+  async saveBinConflictCopy(pNfc, u8, mtime, tag) {
+    const dot = pNfc.lastIndexOf('.'); const ext = dot > 0 ? pNfc.slice(dot) : ''; const bare = dot > 0 ? pNfc.slice(0, dot) : pNfc;
+    const cp = `${bare} (충돌 ${tag} ${this.tstamp()})${ext}`;
+    await this.writeLocalBin(cp, u8); this._binShadow().set(cp, md5b64(u8)); await this.putBin(cp, u8, mtime);
+    new Notice(`⚠️ 그림 충돌 — 사본 보관: ${cp.split('/').pop()}`);
   }
   async pruneEmptyParents(filePath) {
     // 파일 삭제 후 빈 상위 폴더를 위로 올라가며 정리(휴지통). 다른 파일(.obsidian·첨부 등)이 있으면 안 지움.
@@ -480,6 +659,9 @@ export default class VaultSyncCollab extends Plugin {
     for (const seg of parts) { cur = cur ? `${cur}/${seg}` : seg; if (!(await this.app.vault.adapter.exists(cur))) { try { await this.app.vault.adapter.mkdir(cur); } catch (e) {} } }
   }
   async writeLocal(p, content) { await this.ensureParent(p); this.applying = true; try { await this.app.vault.adapter.write(p, content); } finally { this.applying = false; } }
+  async readBin(p) { return new Uint8Array(await this.app.vault.adapter.readBinary(p)); }
+  // applying 을 «되돌려» 놓는다(false 로 못박지 않는다) — hardReset 처럼 이미 applying 인 채로 부르는 자리가 있다.
+  async writeLocalBin(p, u8) { await this.ensureParent(p); const was = this.applying; this.applying = true; try { await this.app.vault.adapter.writeBinary(p, this._ab(u8)); } finally { this.applying = was; } }
   tstamp() { const d = new Date(), z = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}${z(d.getMinutes())}`; }
   _diffAt(a, b) { a = a || ''; b = b || ''; let i = 0; const m = Math.min(a.length, b.length); while (i < m && a[i] === b[i]) i++; return { i, local: a.slice(Math.max(0, i - 14), i + 14), server: b.slice(Math.max(0, i - 14), i + 14) }; }
   async logConflict(p, where, base, local, server, localMtime, serverMtime, serverLastEditor, serverClientVersion) {
@@ -526,9 +708,13 @@ export default class VaultSyncCollab extends Plugin {
   }
   async pushAll() {
     if (!this.configured()) { new Notice('먼저 설정을 채우세요'); return; }
-    const files = this.app.vault.getMarkdownFiles(); new Notice(`업로드 시작 ${files.length}개…`); let ok = 0;
+    const all = this.app.vault.getFiles ? this.app.vault.getFiles() : [];
+    const files = this.app.vault.getMarkdownFiles().concat(all.filter((f) => this.isCanvasPath(f.path) && !this._ignored(f.path)));
+    const bins = all.filter((f) => this.isBinPath(f.path) && !this._ignored(f.path));
+    new Notice(`업로드 시작 — 노트·캔버스 ${files.length}개 · 그림 ${bins.length}개…`); let ok = 0, bok = 0;
     for (const f of files) { try { const content = await this.app.vault.adapter.read(f.path); await this.upsert(nfc(f.path), content, f.stat.mtime); ok++; } catch (e) {} }
-    new Notice(`업로드 완료 ${ok}/${files.length}`);
+    for (const f of bins) { try { await this.onLocalBin(nfc(f.path), (f.stat && f.stat.mtime) || Date.now()); bok++; } catch (e) {} }   // 상한 넘는 것은 putBin 이 남기고 건너뛴다
+    new Notice(`업로드 완료 — 노트 ${ok}/${files.length} · 그림 ${bok}/${bins.length}`);
   }
   // 처음부터 다시 받기(하드 리셋): 로컬 .md 를 전부 지우고 서버본으로 통째 갈아엎는다.
   // 안전 순서 — ①서버 전체를 먼저 받아온다(실패하면 로컬은 손대지 않음) → ②로컬 .md 삭제 → ③서버본 기록.
@@ -567,13 +753,19 @@ export default class VaultSyncCollab extends Plugin {
     let del = 0, wr = 0;
     try {
       for (const f of this.app.vault.getMarkdownFiles()) { try { await this.app.vault.adapter.remove(f.path); del++; } catch (e) {} }
-      this.shadow.clear();
+      this.shadow.clear(); this._binShadow().clear();
+      const bins = [];
       for (const d of docs) {
         if (d.deleted || d._deleted) continue;
         const p = d.path || d._id.slice(prefix.length);
-        if (!p.endsWith('.md')) continue;
+        if (this.isBinPath(p)) { bins.push([p, d]); continue; }   // 그림은 첨부를 따로 받아야 한다 — 아래에서
+        if (!this.isTextPath(p)) continue;   // 캔버스도 서버본을 쓴다. 다만 «지우지는» 않았다(위 삭제는 .md 뿐)
         try { await this.ensureParent(p); await this.app.vault.adapter.write(p, d.content || ''); this.shadow.set(p, d.content || ''); wr++; } catch (e) {}
       }
+      // 그림은 «로컬을 먼저 지우지 않는다». .md 를 지우는 이유는 옛 버전에서 업로드가 막힌 채 로컬에만
+      // 쌓인 편집분이 서버(정본)를 덮는 것을 막기 위해서인데, 그림은 옵시디언에서 고치는 것이 아니라
+      // 그 걱정이 없다. 반면 이 재기준은 버전을 올릴 때마다 도므로, 여기서 지웠다가 못 받아오면 그냥 잃는다.
+      for (const [p, d] of bins) { try { if (await this.pullBinTo(p, d)) wr++; } catch (e) {} }
     } finally { this.applying = false; this._suppressUntil = Date.now() + 12000; }   // 리셋 후 12초간 로컬→서버 전파 차단(뒤늦게 뜨는 delete 이벤트가 서버 대량삭제로 번지는 것 방지)
     try { const info = await this.req('GET', encodeURIComponent(this.settings.dbName)); if (info.status === 200 && info.json && info.json.update_seq !== undefined) { this.settings.lastSeq = info.json.update_seq; await this.saveSettings(); } } catch (e) {}
     new Notice(`♻️ 다시 받기 완료 — 로컬 ${del}개 삭제 · 서버본 ${wr}개 기록`);
