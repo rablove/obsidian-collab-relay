@@ -127,7 +127,8 @@ const COLLAB_CSS = `
   box-shadow: 0 1px 4px rgba(0,0,0,.28) !important; transition: opacity .15s ease !important; pointer-events: none !important;
 }
 .cm-ySelection { border-radius: 2px; }
-body.collab-syncgate-open .modal-close-button, body.collab-harnesslock-open .modal-close-button { display: none !important; }
+body.collab-syncgate-open .modal-close-button, body.collab-harnesslock-open .modal-close-button,
+body.collab-canvassync-open .modal-close-button { display: none !important; }
 /* 캔버스 카드의 «진짜 버튼». 테마 변수를 쓰므로 라이트/다크 둘 다 따라간다. */
 .lpms-ask { display: flex; flex-direction: column; gap: 6px; margin: 2px 0; }
 .lpms-ask-text { white-space: pre-wrap; line-height: 1.45; }
@@ -235,19 +236,74 @@ export default class VaultSyncCollab extends Plugin {
   //  파일이 갈리면 그 판본이 되돌아와 **방금 받은 것을 덮는다**(= 서버가 쓴 것을 잃는다).
   //  → 열려 있는 동안은 미뤄 두고, 닫히면 canvasReconcile 이 그때 받아 맞춘다.
   //  활성 탭만 보면(getActiveFile) 뒤 탭에 열어 둔 판을 놓친다 — 열린 캔버스 뷰를 다 센다.
-  canvasOpenPaths() {
-    const out = new Set();
+  //  경로를 주면 그 판이 열린 탭만, 안 주면 열린 캔버스 탭 전부.
+  canvasLeaves(p) {
     const ws = this.app && this.app.workspace;
-    if (!ws || typeof ws.getLeavesOfType !== 'function') return out;   // 캔버스가 없는 환경(옛 옵시디언·시험)에선 지킬 것도 없다
+    if (!ws || typeof ws.getLeavesOfType !== 'function') return [];   // 캔버스가 없는 환경(옛 옵시디언·시험)에선 지킬 것도 없다
+    const k = p == null ? null : nfc(p);
+    const out = [];
     try {
       for (const leaf of (ws.getLeavesOfType('canvas') || [])) {
         const f = leaf && leaf.view && leaf.view.file;
-        if (f && f.path) out.add(nfc(f.path));
+        if (f && f.path && (k === null || nfc(f.path) === k)) out.push(leaf);
       }
-    } catch (e) { console.error('[sync] canvasOpenPaths', e); }
+    } catch (e) { console.error('[sync] canvasLeaves', e); }
     return out;
   }
-  canvasOpen(p) { return this.canvasOpenPaths().has(nfc(p)); }
+  canvasOpen(p) { return this.canvasLeaves(p).length > 0; }
+  /* ⭐ 열어 둔 판에 서버 변경이 오면 «닫을 때까지 미루지» 않고 그 자리서 반영한다 (형 지시 2026-08-14).
+     순서가 전부다:
+       ① 모달로 손을 막는다 — 쓰는 사이에 카드를 끌면 그 판본이 되돌아온다
+       ② 여느 applyRemote 길로 파일을 쓴다 — 사본·병합 규칙이 그대로 걸린다(형이 고친 게 있으면 안 잃는다)
+       ③ 화면의 판을 새 내용으로 갈아 끼운다 — ③ 을 안 하면 메모리에 든 옛 판이 곧 파일을 도로 덮는다
+     ②는 재귀로 부른다. `_canvasBusy` 가 그 판이면 위 가드가 스스로를 안 잡는다. */
+  async canvasLive(doc, p) {
+    const k = nfc(p);
+    this._canvasBusy = k;
+    try {
+      // 내용이 같으면 아무 일도 안 난다 — 뒤에서 도는 전체 확인마다 모달이 번쩍이면 안 된다.
+      let same = false;
+      try { same = !doc.deleted && !doc._deleted && (await this.app.vault.adapter.exists(p))
+                   && (await this.app.vault.adapter.read(p)) === (doc.content || ''); } catch (e) {}
+      if (same) return await this.applyRemote(doc);
+      const modal = new CanvasSyncModal(this.app, k.split('/').pop());
+      modal.open();
+      try {
+        const changed = await this.applyRemote(doc);
+        if (!changed) { modal.allowClose = true; modal.close(); return false; }
+        if (await this.reloadCanvas(k)) { modal.done('✅ 서버본으로 맞췄습니다.'); }
+        else {
+          // 화면을 못 갈아 끼웠다 — 그냥 두면 메모리의 옛 판이 파일을 도로 덮는다. 형이 손을 써야 한다.
+          this.deferCanvas(k, true);
+          modal.warn('⚠️ 화면을 갈아 끼우지 못했습니다. 이 판을 닫았다 다시 열어 주십시오 (닫으면 맞춰집니다).');
+        }
+        return true;
+      } catch (e) { modal.warn('⚠️ 반영 중 문제가 생겼습니다 — 콘솔을 보십시오.'); throw e; }
+    } finally { this._canvasBusy = null; }
+  }
+  // 화면의 판을 파일 내용으로 갈아 끼운다. 다 됐으면 true.
+  async reloadCanvas(p) {
+    const leaves = this.canvasLeaves(p);
+    if (!leaves.length) return true;
+    let data = null;
+    try { data = JSON.parse(await this.app.vault.adapter.read(p)); }
+    catch (e) { console.error('[sync] reloadCanvas 읽기', p, e); return false; }
+    let all = true;
+    for (const leaf of leaves) {
+      try {
+        const cv = leaf.view && leaf.view.canvas;
+        if (cv && typeof cv.setData === 'function') { cv.setData(data); continue; }   // 보던 자리·확대를 지킨 채 갈아 끼운다
+        if (typeof leaf.getViewState === 'function' && typeof leaf.setViewState === 'function') {
+          const st = leaf.getViewState();                     // setData 가 없으면 탭을 다시 연다 — 보던 자리는 잃지만 확실하다
+          await leaf.setViewState({ type: 'empty' });
+          await leaf.setViewState(st);
+          continue;
+        }
+        all = false;
+      } catch (e) { console.error('[sync] reloadCanvas', p, e); all = false; }
+    }
+    return all;
+  }
   /* ── 캔버스 카드의 «진짜 버튼» ───────────────────────────────────────────
      ⭐ **글은 카드에 적는다. 블록은 버튼만 놓는 자리다.** (형 지시 2026-08-14 —
         「그 카드 안에 있는 내용이 다 채널로 가게」.) 카드가 이러면:
@@ -318,7 +374,7 @@ export default class VaultSyncCollab extends Plugin {
       note.setText(r.msg);
       if (!r.ok) { btn.disabled = false; return; }
       // 다시 누를 수는 있게 하되 바로는 아니다 — 손이 두 번 가서 세션이 둘 뜨는 것을 막는다.
-      window.setTimeout(() => { try { btn.disabled = false; btn.setText('다시 보내기'); } catch (e) {} }, 10000);
+      setTimeout(() => { try { btn.disabled = false; btn.setText('다시 보내기'); } catch (e) {} }, 10000);
     };
   }
   async sendCanvasAsk({ board, kind, text, unit }) {
@@ -347,13 +403,13 @@ export default class VaultSyncCollab extends Plugin {
       return { ok: false, msg: `⛔ 못 올렸습니다 (${res.status})` };
     } catch (e) { console.error('[sync] canvasAsk', e); return { ok: false, msg: '⛔ 못 올렸습니다 (연결)' }; }
   }
-  // 미룬 것을 기억해 둔다(닫힐 때 받으려고). 처음 미룰 때만 알린다 — 왜 판이 안 바뀌는지 보이게.
-  deferCanvas(p) {
+  // 화면을 못 갈아 끼웠을 때만 쓴다 — 닫힐 때 canvasReconcile 이 다시 맞춘다(물러설 자리).
+  deferCanvas(p, quiet) {
     const k = nfc(p);
     if (!this._canvasDefer) this._canvasDefer = new Set();
     if (!this._canvasDefer.has(k)) {
       this._canvasDefer.add(k);
-      new Notice(`🗂 «${k.split('/').pop()}» 이 열려 있어 서버본을 안 덮었습니다 — 닫으면 반영됩니다`, 8000);
+      if (!quiet) new Notice(`🗂 «${k.split('/').pop()}» — 닫으면 서버본으로 맞춰집니다`, 8000);
     }
     return false;
   }
@@ -362,9 +418,8 @@ export default class VaultSyncCollab extends Plugin {
   //  고쳤으면 여느 때처럼 최신 승 + 사본이다. 잃는 것은 없다.)
   async canvasReconcile() {
     if (!this._canvasDefer || !this._canvasDefer.size || !this.configured()) return;
-    const open = this.canvasOpenPaths();
     for (const p of Array.from(this._canvasDefer)) {
-      if (open.has(p)) continue;
+      if (this.canvasOpen(p)) continue;
       this._canvasDefer.delete(p);
       try {
         const cur = await this.req('GET', this.docUrl(this.idFor(p)));
@@ -673,12 +728,12 @@ export default class VaultSyncCollab extends Plugin {
     if (this.isBinPath(p)) return this.applyRemoteBin(doc, p);   // 그림 — 첨부(bin)를 따로 받아 통째로
     if (!this.isTextPath(p)) return false;
     if (nfc(p) === this.collabPath) return false;   // 협업 중인 노트 → relay(Yjs)가 소유, 건드리지 않음
-    if (this.isCanvasPath(p) && this.canvasOpen(p)) return this.deferCanvas(p);   // 열어 둔 캔버스는 덮지 않는다 — 닫히면 canvasReconcile 이 받는다
+    if (this.isCanvasPath(p) && this._canvasBusy !== nfc(p) && this.canvasOpen(p)) return this.canvasLive(doc, p);   // 열어 둔 판 → 모달 띄우고 그 자리서 맞춘다
     const R = doc.content || '';
     try {
       const exists = await this.app.vault.adapter.exists(p);
       if (nfc(p) === this.collabPath) return false;   // 확인하는 사이에 이 노트가 열렸다 → relay 가 주인, 손대지 않는다
-      if (this.isCanvasPath(p) && this.canvasOpen(p)) return this.deferCanvas(p);   // 확인하는 사이에 이 캔버스가 열렸다
+      if (this.isCanvasPath(p) && this._canvasBusy !== nfc(p) && this.canvasOpen(p)) return this.canvasLive(doc, p);   // 확인하는 사이에 이 판이 열렸다
       if (doc.deleted || doc._deleted) {
         if (exists) { this.applying = true; try { const af = this.app.vault.getAbstractFileByPath(p); if (af) await this.app.vault.trash(af, false); else await this.app.vault.adapter.remove(p); } finally { this.applying = false; } await this.pruneEmptyParents(p); }
         this.shadow.delete(p); return exists;
@@ -686,7 +741,7 @@ export default class VaultSyncCollab extends Plugin {
       if (!exists) { await this.writeLocal(p, R); this.shadow.set(p, R); return true; }
       const local = await this.app.vault.adapter.read(p);
       if (nfc(p) === this.collabPath) return false;   // 읽는 사이에 이 노트가 열렸다 → relay 가 주인(뒤에서 도는 전체 확인이 열린 노트를 덮는 것 방지)
-      if (this.isCanvasPath(p) && this.canvasOpen(p)) return this.deferCanvas(p);   // 읽는 사이에 이 캔버스가 열렸다
+      if (this.isCanvasPath(p) && this._canvasBusy !== nfc(p) && this.canvasOpen(p)) return this.canvasLive(doc, p);   // 읽는 사이에 이 판이 열렸다
       if (local === R) { this.shadow.set(p, R); return false; }
       const base = this.shadow.get(p);
       if (base === undefined) {
@@ -1548,6 +1603,26 @@ class SyncGateModal extends Modal {
   }
   close() { if (this.allowClose) super.close(); }   // 완료 전엔 Esc·배경클릭·X 로 안 닫힘
   onClose() { try { document.body.classList.remove('collab-syncgate-open'); } catch (e) {} this.contentEl.empty(); }
+}
+class CanvasSyncModal extends Modal {   // 열어 둔 판을 서버본으로 맞추는 동안 뜬다(닫기 불가). 끝나면 저절로 닫힌다.
+  constructor(app, name) { super(app); this.name = name || '판'; this.allowClose = false; }
+  onOpen() {
+    const { contentEl, containerEl } = this;
+    document.body.classList.add('collab-canvassync-open');
+    try { containerEl.querySelectorAll('.modal-close-button').forEach((x) => x.remove()); } catch (e) {}
+    contentEl.createEl('h3', { text: '🗂 판을 서버본으로 맞추는 중' });
+    this.msgEl = contentEl.createEl('p', { text: `«${this.name}» 을 서버가 고쳤습니다. 맞추는 동안 카드를 건드리지 마십시오 — 곧 저절로 닫힙니다.` });
+  }
+  // 다 맞췄다 — 무엇이 일어났는지 잠깐 보여 주고 저절로 닫는다(왜 판이 바뀌었는지 알 수 있게).
+  done(msg) {
+    this.allowClose = true;
+    if (this.msgEl) this.msgEl.setText(msg);
+    setTimeout(() => { try { this.close(); } catch (e) {} }, 1600);
+  }
+  // 형이 손을 써야 하는 자리 — 저절로 안 닫고 닫을 수 있게 둔다.
+  warn(msg) { this.allowClose = true; if (this.msgEl) this.msgEl.setText(msg); }
+  close() { if (this.allowClose) super.close(); }
+  onClose() { try { document.body.classList.remove('collab-canvassync-open'); } catch (e) {} this.contentEl.empty(); }
 }
 class HarnessLockModal extends Modal {   // 하네스가 이 노트를 갱신하는 동안 뜬다(닫기 불가). 하네스가 끝내면 자동으로 닫힌다.
   constructor(app) { super(app); this.allowClose = false; }

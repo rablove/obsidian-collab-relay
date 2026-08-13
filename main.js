@@ -10599,7 +10599,8 @@ var COLLAB_CSS = `
   box-shadow: 0 1px 4px rgba(0,0,0,.28) !important; transition: opacity .15s ease !important; pointer-events: none !important;
 }
 .cm-ySelection { border-radius: 2px; }
-body.collab-syncgate-open .modal-close-button, body.collab-harnesslock-open .modal-close-button { display: none !important; }
+body.collab-syncgate-open .modal-close-button, body.collab-harnesslock-open .modal-close-button,
+body.collab-canvassync-open .modal-close-button { display: none !important; }
 /* \uCE94\uBC84\uC2A4 \uCE74\uB4DC\uC758 \xAB\uC9C4\uC9DC \uBC84\uD2BC\xBB. \uD14C\uB9C8 \uBCC0\uC218\uB97C \uC4F0\uBBC0\uB85C \uB77C\uC774\uD2B8/\uB2E4\uD06C \uB458 \uB2E4 \uB530\uB77C\uAC04\uB2E4. */
 .lpms-ask { display: flex; flex-direction: column; gap: 6px; margin: 2px 0; }
 .lpms-ask-text { white-space: pre-wrap; line-height: 1.45; }
@@ -10763,22 +10764,97 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   //  파일이 갈리면 그 판본이 되돌아와 **방금 받은 것을 덮는다**(= 서버가 쓴 것을 잃는다).
   //  → 열려 있는 동안은 미뤄 두고, 닫히면 canvasReconcile 이 그때 받아 맞춘다.
   //  활성 탭만 보면(getActiveFile) 뒤 탭에 열어 둔 판을 놓친다 — 열린 캔버스 뷰를 다 센다.
-  canvasOpenPaths() {
-    const out = /* @__PURE__ */ new Set();
+  //  경로를 주면 그 판이 열린 탭만, 안 주면 열린 캔버스 탭 전부.
+  canvasLeaves(p) {
     const ws = this.app && this.app.workspace;
-    if (!ws || typeof ws.getLeavesOfType !== "function") return out;
+    if (!ws || typeof ws.getLeavesOfType !== "function") return [];
+    const k = p == null ? null : nfc(p);
+    const out = [];
     try {
       for (const leaf of ws.getLeavesOfType("canvas") || []) {
         const f = leaf && leaf.view && leaf.view.file;
-        if (f && f.path) out.add(nfc(f.path));
+        if (f && f.path && (k === null || nfc(f.path) === k)) out.push(leaf);
       }
     } catch (e) {
-      console.error("[sync] canvasOpenPaths", e);
+      console.error("[sync] canvasLeaves", e);
     }
     return out;
   }
   canvasOpen(p) {
-    return this.canvasOpenPaths().has(nfc(p));
+    return this.canvasLeaves(p).length > 0;
+  }
+  /* ⭐ 열어 둔 판에 서버 변경이 오면 «닫을 때까지 미루지» 않고 그 자리서 반영한다 (형 지시 2026-08-14).
+     순서가 전부다:
+       ① 모달로 손을 막는다 — 쓰는 사이에 카드를 끌면 그 판본이 되돌아온다
+       ② 여느 applyRemote 길로 파일을 쓴다 — 사본·병합 규칙이 그대로 걸린다(형이 고친 게 있으면 안 잃는다)
+       ③ 화면의 판을 새 내용으로 갈아 끼운다 — ③ 을 안 하면 메모리에 든 옛 판이 곧 파일을 도로 덮는다
+     ②는 재귀로 부른다. `_canvasBusy` 가 그 판이면 위 가드가 스스로를 안 잡는다. */
+  async canvasLive(doc2, p) {
+    const k = nfc(p);
+    this._canvasBusy = k;
+    try {
+      let same = false;
+      try {
+        same = !doc2.deleted && !doc2._deleted && await this.app.vault.adapter.exists(p) && await this.app.vault.adapter.read(p) === (doc2.content || "");
+      } catch (e) {
+      }
+      if (same) return await this.applyRemote(doc2);
+      const modal = new CanvasSyncModal(this.app, k.split("/").pop());
+      modal.open();
+      try {
+        const changed = await this.applyRemote(doc2);
+        if (!changed) {
+          modal.allowClose = true;
+          modal.close();
+          return false;
+        }
+        if (await this.reloadCanvas(k)) {
+          modal.done("\u2705 \uC11C\uBC84\uBCF8\uC73C\uB85C \uB9DE\uCDC4\uC2B5\uB2C8\uB2E4.");
+        } else {
+          this.deferCanvas(k, true);
+          modal.warn("\u26A0\uFE0F \uD654\uBA74\uC744 \uAC08\uC544 \uB07C\uC6B0\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uC774 \uD310\uC744 \uB2EB\uC558\uB2E4 \uB2E4\uC2DC \uC5F4\uC5B4 \uC8FC\uC2ED\uC2DC\uC624 (\uB2EB\uC73C\uBA74 \uB9DE\uCDB0\uC9D1\uB2C8\uB2E4).");
+        }
+        return true;
+      } catch (e) {
+        modal.warn("\u26A0\uFE0F \uBC18\uC601 \uC911 \uBB38\uC81C\uAC00 \uC0DD\uACBC\uC2B5\uB2C8\uB2E4 \u2014 \uCF58\uC194\uC744 \uBCF4\uC2ED\uC2DC\uC624.");
+        throw e;
+      }
+    } finally {
+      this._canvasBusy = null;
+    }
+  }
+  // 화면의 판을 파일 내용으로 갈아 끼운다. 다 됐으면 true.
+  async reloadCanvas(p) {
+    const leaves = this.canvasLeaves(p);
+    if (!leaves.length) return true;
+    let data = null;
+    try {
+      data = JSON.parse(await this.app.vault.adapter.read(p));
+    } catch (e) {
+      console.error("[sync] reloadCanvas \uC77D\uAE30", p, e);
+      return false;
+    }
+    let all2 = true;
+    for (const leaf of leaves) {
+      try {
+        const cv = leaf.view && leaf.view.canvas;
+        if (cv && typeof cv.setData === "function") {
+          cv.setData(data);
+          continue;
+        }
+        if (typeof leaf.getViewState === "function" && typeof leaf.setViewState === "function") {
+          const st = leaf.getViewState();
+          await leaf.setViewState({ type: "empty" });
+          await leaf.setViewState(st);
+          continue;
+        }
+        all2 = false;
+      } catch (e) {
+        console.error("[sync] reloadCanvas", p, e);
+        all2 = false;
+      }
+    }
+    return all2;
   }
   /* ── 캔버스 카드의 «진짜 버튼» ───────────────────────────────────────────
        ⭐ **글은 카드에 적는다. 블록은 버튼만 놓는 자리다.** (형 지시 2026-08-14 —
@@ -10856,7 +10932,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         btn.disabled = false;
         return;
       }
-      window.setTimeout(() => {
+      setTimeout(() => {
         try {
           btn.disabled = false;
           btn.setText("\uB2E4\uC2DC \uBCF4\uB0B4\uAE30");
@@ -10900,13 +10976,13 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       return { ok: false, msg: "\u26D4 \uBABB \uC62C\uB838\uC2B5\uB2C8\uB2E4 (\uC5F0\uACB0)" };
     }
   }
-  // 미룬 것을 기억해 둔다(닫힐 때 받으려고). 처음 미룰 때만 알린다 — 왜 판이 안 바뀌는지 보이게.
-  deferCanvas(p) {
+  // 화면을 못 갈아 끼웠을 때만 쓴다 — 닫힐 때 canvasReconcile 이 다시 맞춘다(물러설 자리).
+  deferCanvas(p, quiet) {
     const k = nfc(p);
     if (!this._canvasDefer) this._canvasDefer = /* @__PURE__ */ new Set();
     if (!this._canvasDefer.has(k)) {
       this._canvasDefer.add(k);
-      new import_obsidian.Notice(`\u{1F5C2} \xAB${k.split("/").pop()}\xBB \uC774 \uC5F4\uB824 \uC788\uC5B4 \uC11C\uBC84\uBCF8\uC744 \uC548 \uB36E\uC5C8\uC2B5\uB2C8\uB2E4 \u2014 \uB2EB\uC73C\uBA74 \uBC18\uC601\uB429\uB2C8\uB2E4`, 8e3);
+      if (!quiet) new import_obsidian.Notice(`\u{1F5C2} \xAB${k.split("/").pop()}\xBB \u2014 \uB2EB\uC73C\uBA74 \uC11C\uBC84\uBCF8\uC73C\uB85C \uB9DE\uCDB0\uC9D1\uB2C8\uB2E4`, 8e3);
     }
     return false;
   }
@@ -10915,9 +10991,8 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   //  고쳤으면 여느 때처럼 최신 승 + 사본이다. 잃는 것은 없다.)
   async canvasReconcile() {
     if (!this._canvasDefer || !this._canvasDefer.size || !this.configured()) return;
-    const open = this.canvasOpenPaths();
     for (const p of Array.from(this._canvasDefer)) {
-      if (open.has(p)) continue;
+      if (this.canvasOpen(p)) continue;
       this._canvasDefer.delete(p);
       try {
         const cur = await this.req("GET", this.docUrl(this.idFor(p)));
@@ -11419,12 +11494,12 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     if (this.isBinPath(p)) return this.applyRemoteBin(doc2, p);
     if (!this.isTextPath(p)) return false;
     if (nfc(p) === this.collabPath) return false;
-    if (this.isCanvasPath(p) && this.canvasOpen(p)) return this.deferCanvas(p);
+    if (this.isCanvasPath(p) && this._canvasBusy !== nfc(p) && this.canvasOpen(p)) return this.canvasLive(doc2, p);
     const R = doc2.content || "";
     try {
       const exists = await this.app.vault.adapter.exists(p);
       if (nfc(p) === this.collabPath) return false;
-      if (this.isCanvasPath(p) && this.canvasOpen(p)) return this.deferCanvas(p);
+      if (this.isCanvasPath(p) && this._canvasBusy !== nfc(p) && this.canvasOpen(p)) return this.canvasLive(doc2, p);
       if (doc2.deleted || doc2._deleted) {
         if (exists) {
           this.applying = true;
@@ -11447,7 +11522,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       }
       const local = await this.app.vault.adapter.read(p);
       if (nfc(p) === this.collabPath) return false;
-      if (this.isCanvasPath(p) && this.canvasOpen(p)) return this.deferCanvas(p);
+      if (this.isCanvasPath(p) && this._canvasBusy !== nfc(p) && this.canvasOpen(p)) return this.canvasLive(doc2, p);
       if (local === R) {
         this.shadow.set(p, R);
         return false;
@@ -12994,6 +13069,50 @@ var SyncGateModal = class extends import_obsidian.Modal {
   onClose() {
     try {
       document.body.classList.remove("collab-syncgate-open");
+    } catch (e) {
+    }
+    this.contentEl.empty();
+  }
+};
+var CanvasSyncModal = class extends import_obsidian.Modal {
+  // 열어 둔 판을 서버본으로 맞추는 동안 뜬다(닫기 불가). 끝나면 저절로 닫힌다.
+  constructor(app, name) {
+    super(app);
+    this.name = name || "\uD310";
+    this.allowClose = false;
+  }
+  onOpen() {
+    const { contentEl, containerEl } = this;
+    document.body.classList.add("collab-canvassync-open");
+    try {
+      containerEl.querySelectorAll(".modal-close-button").forEach((x) => x.remove());
+    } catch (e) {
+    }
+    contentEl.createEl("h3", { text: "\u{1F5C2} \uD310\uC744 \uC11C\uBC84\uBCF8\uC73C\uB85C \uB9DE\uCD94\uB294 \uC911" });
+    this.msgEl = contentEl.createEl("p", { text: `\xAB${this.name}\xBB \uC744 \uC11C\uBC84\uAC00 \uACE0\uCCE4\uC2B5\uB2C8\uB2E4. \uB9DE\uCD94\uB294 \uB3D9\uC548 \uCE74\uB4DC\uB97C \uAC74\uB4DC\uB9AC\uC9C0 \uB9C8\uC2ED\uC2DC\uC624 \u2014 \uACE7 \uC800\uC808\uB85C \uB2EB\uD799\uB2C8\uB2E4.` });
+  }
+  // 다 맞췄다 — 무엇이 일어났는지 잠깐 보여 주고 저절로 닫는다(왜 판이 바뀌었는지 알 수 있게).
+  done(msg) {
+    this.allowClose = true;
+    if (this.msgEl) this.msgEl.setText(msg);
+    setTimeout(() => {
+      try {
+        this.close();
+      } catch (e) {
+      }
+    }, 1600);
+  }
+  // 형이 손을 써야 하는 자리 — 저절로 안 닫고 닫을 수 있게 둔다.
+  warn(msg) {
+    this.allowClose = true;
+    if (this.msgEl) this.msgEl.setText(msg);
+  }
+  close() {
+    if (this.allowClose) super.close();
+  }
+  onClose() {
+    try {
+      document.body.classList.remove("collab-canvassync-open");
     } catch (e) {
     }
     this.contentEl.empty();
