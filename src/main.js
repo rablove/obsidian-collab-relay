@@ -155,6 +155,57 @@ export default class VaultSyncCollab extends Plugin {
     return null;
   }
 
+  // 다른 «가운데 토막»만 Y.Text 에 반영한다. 통짜로 갈아끼우면 남의 커서·편집이 다 밀리므로 최소 차이만 넣는다.
+  //  (relay 의 applyMinDiff 와 같은 방식 — 앞뒤 공통 부분을 뺀 나머지만 지우고 넣는다.)
+  _minDiff(ytext, next) {
+    const cur = ytext.toString();
+    if (cur === next) return false;
+    let p = 0; const mn = Math.min(cur.length, next.length);
+    while (p < mn && cur[p] === next[p]) p++;
+    let s = 0; while (s < mn - p && cur[cur.length - 1 - s] === next[next.length - 1 - s]) s++;
+    const del = cur.length - p - s; const ins = next.slice(p, next.length - s);
+    const run = () => { if (del > 0) ytext.delete(p, del); if (ins) ytext.insert(p, ins); };
+    if (ytext.doc && ytext.doc.transact) ytext.doc.transact(run); else run();
+    return true;
+  }
+  // ⭐ 붙기 «전에» 에디터 문서와 Y.Text 를 맞춘다 (2026-08-13 사고).
+  //  왜: y-codemirror 는 붙을 때 둘을 맞추지 않는다(YSyncPluginValue 생성자는 observe 만 건다). 그래서
+  //  다른 채로 붙으면 두 쪽의 «글자 위치»가 어긋난 채로 굳고, 그 뒤 친 글자가 엉뚱한 자리에 들어간다.
+  //  (실제 사고: 새로 친 줄이 `---` 의 첫 `-` 와 둘째 `-` 사이에 박히고 `##` 이 `#` 이 됐다.)
+  //  어느 쪽으로 맞추나: 한쪽이 다른 쪽을 온전히 품으면 그 상위집합으로 — 아무것도 안 잃는다.
+  //  진짜 갈렸으면 서버(Y.Text)를 따르되(RULES §0.4 서버가 정본) 에디터 것을 사본으로 남긴다.
+  async _reconcileAttach(cm, ytext, pNfc) {
+    let cur = null; try { cur = cm.state.doc.toString(); } catch (e) { return false; }
+    const yt = ytext.toString();
+    if (cur === yt) return false;
+    const rel = this._relate(cur, yt);
+    if (rel === 'a') this._minDiff(ytext, cur);   // 에디터가 상위집합 → Y.Text 를 올린다
+    else {
+      if (rel === null) { try { await this.saveConflictCopy(pNfc, cur, Date.now(), this.settings.deviceId || 'local'); } catch (e) {} }
+      try { cm.dispatch({ changes: { from: 0, to: cm.state.doc.length, insert: yt } }); } catch (e) {}
+    }
+    try { await this.logConflict(pNfc, 'attach-mismatch', yt, cur, yt, Date.now(), 0, null, null); } catch (e) {}
+    return true;
+  }
+  // ⭐ 협업 중인 노트의 «파일»이 에디터를 안 거치고 바뀌면 Y.Doc 은 그것을 모른다 (2026-08-13 사고).
+  //  읽기 모드에서 체크박스를 누르면 옵시디언이 파일을 직접 고친다 — 편집기를 안 거치니 y-codemirror 도 모르고,
+  //  파일동기화도 collabPath 라 건너뛴다. 그 편집은 노트를 닫을 때까지 아무 데도 못 가고, 닫는 순간 서버본과
+  //  갈려 충돌본이 된다(실제 사고: 체크박스 두 개). → 그 차이를 Y.Doc 에 넣어 준다.
+  async collabAbsorb(pNfc) {
+    const s = this.session;
+    if (!s || !s.attached || nfc(s.path) !== pNfc) return false;
+    let content; try { content = await this.app.vault.adapter.read(s.path); } catch (e) { return false; }
+    if (content === s.lastWritten) return false;          // 우리가 방금 쓴 것이 되돌아온 것
+    const yt = s.ytext.toString();
+    if (content === yt) return false;                     // 이미 같다
+    let cur = null; try { cur = s.cm.state.doc.toString(); } catch (e) {}
+    if (cur !== null) {
+      if (cur === content) return false;   // 에디터가 이미 그 내용 → y-codemirror 몫이다. 여기서 또 넣으면 같은 변경이 두 번 들어간다
+      if (cur !== yt) return false;        // 에디터와 Y.Text 가 이미 어긋났다 → 여기서 밀어넣으면 더 어긋난다(_reconcileAttach 가 이 경우를 없앤다)
+    }
+    return this._minDiff(s.ytext, content);
+  }
+
   /* ============ 파일 동기화 (CouchDB) ============ */
   async req(method, path, body) {
     const base = (this.settings.couchUrl || '').replace(/\/$/, '');
@@ -181,7 +232,7 @@ export default class VaultSyncCollab extends Plugin {
   async onLocal(file) {
     if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured() || !this.isMd(file) || this._ignored(file.path)) return;
     const p = nfc(file.path);
-    if (p === this.collabPath) return;   // 협업 중인 노트는 relay 가 처리 (겹침 방지)
+    if (p === this.collabPath) { await this.collabAbsorb(p); return; }   // 협업 중인 노트는 relay 가 처리 (겹침 방지) — 단 «에디터를 안 거친» 파일 변경은 Y.Doc 에 넣어준다
     let content; try { content = await this.app.vault.adapter.read(file.path); } catch (e) { return; }
     if (this.shadow.get(p) === content) return;
     await this.upsert(p, content, (file.stat && file.stat.mtime) || Date.now());
@@ -958,6 +1009,8 @@ export default class VaultSyncCollab extends Plugin {
       } catch (e) {} }, 700); };
       session.persist = persist; ytext.observe(persist);
       // awarenessFilter: «커서 안 보이기» 로 지정한 사람만 이 화면에서 빠진다(내용·상대 편집엔 영향 없음).
+      await this._reconcileAttach(cm, ytext, nfc(path));   // ⭐ 붙기 전에 에디터와 Y.Text 를 맞춘다 — 어긋난 채로 붙으면 글자가 엉뚱한 자리에 들어간다
+      if (this.session !== session) return;
       try { cm.dispatch({ effects: this.compartment.reconfigure(yCollab(ytext, this.awarenessFilter(provider.awareness))) }); } catch (e) { console.error('[collab] attach', e); }
       this.setCollab('연결됨·' + this.peerCount()); this.refreshLock();
       setTimeout(() => this.followScroll(session), 400);   // 따라가는 중이면 그 사람 커서로 스크롤
