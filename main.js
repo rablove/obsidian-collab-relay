@@ -10654,6 +10654,10 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       this.setNet(ok);
       new import_obsidian.Notice(ok ? "\u{1F310} \uC11C\uBC84 \uC5F0\uACB0\uB428 (\uC628\uB77C\uC778)" : "\u{1F512} \uC11C\uBC84 \uC5F0\uACB0 \uC548\uB428 (\uC624\uD504\uB77C\uC778 \u2014 \uD3B8\uC9D1\uC7A0\uAE08 \uB300\uC0C1)", 5e3);
     } });
+    this.addCommand({ id: "update-info", name: "\uC5C5\uB370\uC774\uD2B8 \uC548\uB0B4 \uB2E4\uC2DC \uBCF4\uAE30(\uD3B8\uC9D1\uC774 \uC7A0\uACBC\uC744 \uB54C)", callback: () => {
+      this._verChk = 0;
+      this.checkVersion();
+    } });
     this.addCommand({ id: "conflict-log", name: "\uCDA9\uB3CC \uB85C\uADF8 \uBCF4\uAE30", callback: async () => new ConflictLogModal(this.app, await this.readConflictLog()).open() });
     this.app.workspace.onLayoutReady(async () => {
       this.registerEvent(this.app.vault.on("modify", (f) => this.onLocal(f)));
@@ -12008,15 +12012,28 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         this._outdated = outdated;
         this.refreshLock();
       }
-      if (outdated && !this._updShown) {
-        this._updShown = true;
+      if (outdated) {
+        if (!this._updModal) this.showUpdateModal();
+      } else if (this._updModal) {
         try {
-          new UpdateModal(this.app, this.manifest.version, latest).open();
+          this._updModal.close();
         } catch (e) {
         }
+        this._updModal = null;
       }
-      if (!outdated) this._updShown = false;
     } catch (e) {
+    }
+  }
+  showUpdateModal() {
+    try {
+      const m = new UpdateModal(this.app, this.manifest.version, this._latestVer || "");
+      m.onDismiss = () => {
+        this._updModal = null;
+      };
+      this._updModal = m;
+      m.open();
+    } catch (e) {
+      this._updModal = null;
     }
   }
   refreshLock() {
@@ -12704,6 +12721,10 @@ var UpdateModal = class extends import_obsidian.Modal {
   }
   onClose() {
     this.contentEl.empty();
+    try {
+      if (this.onDismiss) this.onDismiss();
+    } catch (e) {
+    }
   }
 };
 var UpgradeResetModal = class extends import_obsidian.Modal {

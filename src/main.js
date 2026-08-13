@@ -155,6 +155,7 @@ export default class VaultSyncCollab extends Plugin {
     this.addCommand({ id: 'hard-reset', name: '처음부터 다시 받기(로컬 삭제 후 서버본으로)', callback: () => new ConfirmModal(this.app, '처음부터 다시 받기', '이 기기의 로컬 .md 노트를 전부 삭제하고 서버 최신본으로 덮어씁니다. 되돌릴 수 없습니다. 계속할까요?', () => this.hardReset()).open() });
     this.addCommand({ id: 'collab-status', name: '공동편집 참여자', callback: () => new ParticipantModal(this.app, this).open() });
     this.addCommand({ id: 'net-check', name: '연결 상태 확인(온라인/오프라인)', callback: async () => { const ok = await this.probeNet(); this.setNet(ok); new Notice(ok ? '🌐 서버 연결됨 (온라인)' : '🔒 서버 연결 안됨 (오프라인 — 편집잠금 대상)', 5000); } });
+    this.addCommand({ id: 'update-info', name: '업데이트 안내 다시 보기(편집이 잠겼을 때)', callback: () => { this._verChk = 0; this.checkVersion(); } });
     this.addCommand({ id: 'conflict-log', name: '충돌 로그 보기', callback: async () => new ConflictLogModal(this.app, await this.readConflictLog()).open() });
 
     this.app.workspace.onLayoutReady(async () => {
@@ -954,9 +955,22 @@ export default class VaultSyncCollab extends Plugin {
       const outdated = !!latest && this._isNewer(latest, this.manifest.version);
       this._latestVer = latest;
       if (outdated !== this._outdated) { this._outdated = outdated; this.refreshLock(); }
-      if (outdated && !this._updShown) { this._updShown = true; try { new UpdateModal(this.app, this.manifest.version, latest).open(); } catch (e) {} }
-      if (!outdated) this._updShown = false;
+      // ⭐ 모달을 «세션당 한 번»만 띄우던 것을 고쳤다 (2026-08-13, 형 신고: 「업데이트 하라는 모달은 안 뜨고 편집만 막힌다」).
+      //  전에는 `_updShown` 이 한 번 서면 계속 true 라, 형이 «확인»으로 닫는 순간 다시 뜨지 않았다. 그 플래그는
+      //  버전을 안 봐서 **새 릴리스가 나와도** 그대로였다. 그동안 편집은 계속 잠겨 있으니, 남는 안내는 상태바 한 줄뿐인데
+      //  **모바일은 상태바를 안 띄운다** — 아이패드에선 «왜 막혔는지» 알 길이 아예 없었다.
+      //  이제 구버전인 동안에는 모달이 닫혀 있으면 다시 띄운다(확인 주기가 10분이라 그보다 자주 뜨지 않는다).
+      //  편집을 막아 놓았으면 왜 막았는지는 계속 보여야 한다 — 잠금과 안내가 같이 가야 한다.
+      if (outdated) { if (!this._updModal) this.showUpdateModal(); }
+      else if (this._updModal) { try { this._updModal.close(); } catch (e) {} this._updModal = null; }   // 업데이트되면 떠 있던 안내를 치운다
     } catch (e) {}
+  }
+  showUpdateModal() {
+    try {
+      const m = new UpdateModal(this.app, this.manifest.version, this._latestVer || '');
+      m.onDismiss = () => { this._updModal = null; };
+      this._updModal = m; m.open();
+    } catch (e) { this._updModal = null; }
   }
   refreshLock() {
     const kicked = this.kickActive();
@@ -1322,7 +1336,7 @@ class UpdateModal extends Modal {
     const row = contentEl.createDiv(); row.style.cssText = 'display:flex;justify-content:flex-end;margin-top:8px';
     const ok = row.createEl('button', { text: '확인' }); ok.classList.add('mod-cta'); ok.onclick = () => this.close();
   }
-  onClose() { this.contentEl.empty(); }
+  onClose() { this.contentEl.empty(); try { if (this.onDismiss) this.onDismiss(); } catch (e) {} }
 }
 class UpgradeResetModal extends Modal {   // 업데이트 직후 서버본으로 재기준하는 동안 뜬다(닫기 불가). 끝나면 자동으로 닫힌다.
   constructor(app, from, to) { super(app); this.allowClose = false; this.from = from; this.to = to; }
