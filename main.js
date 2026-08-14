@@ -10917,8 +10917,8 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     const inner = lines.join("\n").trim();
     const box = el.createDiv({ cls: "lpms-ask" + (kind === "run" ? " lpms-ask-run" : "") });
     if (kind === "ask" && inner) box.createDiv({ cls: "lpms-ask-text", text: inner });
-    const btn = box.createEl("button", { cls: "lpms-ask-btn", text: kind === "run" ? "\u25B6 \uB3CC\uB9AC\uAE30" : "\u27F9 \uBCF4\uB0B4\uAE30" });
-    const note = box.createDiv({ cls: "lpms-ask-note", text: unit ? `${unit} \uC5D0 \uB300\uD55C \uAC83` : kind === "run" ? "\uC774 \uD310 \uADF8\uB300\uB85C \uB3CC\uB9BD\uB2C8\uB2E4" : "\uD310 \uC804\uCCB4\uC5D0 \uB300\uD55C \uBB3C\uC74C" });
+    const btn = box.createEl("button", { cls: "lpms-ask-btn", text: kind === "run" ? "\uB3CC\uB9AC\uAE30" : "\uBCF4\uB0B4\uAE30" });
+    const note = box.createDiv({ cls: "lpms-ask-note", text: "" });
     btn.onclick = async () => {
       if (btn.disabled) return;
       btn.disabled = true;
@@ -10965,7 +10965,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       });
       if (res.status === 200 || res.status === 201) {
         this._askSent.push(now);
-        new import_obsidian.Notice(kind === "run" ? "\u25B6 \uB3CC\uB9AC\uAE30 \uC694\uCCAD\uC744 \uC62C\uB838\uC2B5\uB2C8\uB2E4" : "\u27F9 \uBB3C\uC74C\uC744 \uC62C\uB838\uC2B5\uB2C8\uB2E4");
+        new import_obsidian.Notice(kind === "run" ? "\uB3CC\uB9AC\uAE30 \uC694\uCCAD\uC744 \uC62C\uB838\uC2B5\uB2C8\uB2E4" : "\uBB3C\uC74C\uC744 \uC62C\uB838\uC2B5\uB2C8\uB2E4");
         const d = new Date(now), z = (n) => String(n).padStart(2, "0");
         return { ok: true, msg: `\u2705 \uC62C\uB838\uC2B5\uB2C8\uB2E4 ${z(d.getHours())}:${z(d.getMinutes())}` };
       }

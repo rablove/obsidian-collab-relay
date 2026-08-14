@@ -361,8 +361,9 @@ export default class VaultSyncCollab extends Plugin {
     const inner = lines.join('\n').trim();   // 블록 «안»에 적은 글(있으면 이긴다)
     const box = el.createDiv({ cls: 'lpms-ask' + (kind === 'run' ? ' lpms-ask-run' : '') });
     if (kind === 'ask' && inner) box.createDiv({ cls: 'lpms-ask-text', text: inner });
-    const btn = box.createEl('button', { cls: 'lpms-ask-btn', text: kind === 'run' ? '▶ 돌리기' : '⟹ 보내기' });
-    const note = box.createDiv({ cls: 'lpms-ask-note', text: unit ? `${unit} 에 대한 것` : (kind === 'run' ? '이 판 그대로 돌립니다' : '판 전체에 대한 물음') });
+    const btn = box.createEl('button', { cls: 'lpms-ask-btn', text: kind === 'run' ? '돌리기' : '보내기' });
+    // 빈칸으로 둔다 — 누른 뒤 «올리는 중…»·«✅ 올렸습니다»·«⛔ …» 가 여기로 나온다(상태 표시줄).
+    const note = box.createDiv({ cls: 'lpms-ask-note', text: '' });
     btn.onclick = async () => {
       if (btn.disabled) return;
       btn.disabled = true; note.setText('올리는 중…');
@@ -395,7 +396,7 @@ export default class VaultSyncCollab extends Plugin {
         mtime: now, deleted: false, clientVersion: this.manifest.version, content: JSON.stringify(rec), rec });
       if (res.status === 200 || res.status === 201) {
         this._askSent.push(now);
-        new Notice(kind === 'run' ? '▶ 돌리기 요청을 올렸습니다' : '⟹ 물음을 올렸습니다');
+        new Notice(kind === 'run' ? '돌리기 요청을 올렸습니다' : '물음을 올렸습니다');
         const d = new Date(now), z = (n) => String(n).padStart(2, '0');
         return { ok: true, msg: `✅ 올렸습니다 ${z(d.getHours())}:${z(d.getMinutes())}` };
       }
