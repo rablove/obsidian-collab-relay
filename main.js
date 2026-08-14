@@ -10378,6 +10378,24 @@ var UPDATE_REPO = "rablove/obsidian-collab-relay";
 var DIAG_DIR = "60_System/_sync-diag";
 var ASK_DIR = "60_System/_canvas-ask";
 var ASK_MAX_PER_HOUR = 6;
+var ASK_FIELDS = { unit: "unit", "\uB2E8\uC704": "unit", "\uCC44\uB110": "\uCC44\uB110", channel: "\uCC44\uB110" };
+var ASK_CHANNELS = {
+  "": "\uC5EC\uAE30",
+  "\uC5EC\uAE30": "\uC5EC\uAE30",
+  "code": "\uC5EC\uAE30",
+  "\uAE30\uBCF8": "\uC5EC\uAE30",
+  "base": "\uC5EC\uAE30",
+  "\uC774 \uCC44\uB110": "\uC5EC\uAE30",
+  "vega": "vega",
+  "\uBCA0\uAC00": "vega",
+  "selim": "vega",
+  "\uC140\uB9BC": "vega",
+  "code-selim": "vega"
+};
+var ASK_FIELD_OK = {
+  unit: (v) => /^\d+\.\d+$/.test(v),
+  "\uCC44\uB110": (v) => Object.prototype.hasOwnProperty.call(ASK_CHANNELS, v.trim().toLowerCase())
+};
 var BIN_EXT = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", svg: "image/svg+xml" };
 var BIN_MAX = 2 * 1024 * 1024;
 var nfc = (s) => s.normalize("NFC");
@@ -10612,6 +10630,8 @@ body.collab-canvassync-open .modal-close-button { display: none !important; }
 .lpms-ask-btn:hover:not(:disabled) { background: var(--interactive-accent-hover); }
 .lpms-ask-btn:disabled { opacity: .5; cursor: default; }
 .lpms-ask-run .lpms-ask-btn { background: var(--color-red, #d64545); border-color: var(--color-red, #d64545); }
+.lpms-ask-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.lpms-ask-ch { padding: 4px 8px; border-radius: 6px; font-size: 13px; }
 .lpms-ask-note { font-size: 12px; color: var(--text-muted); }
 `;
 var VaultSyncCollab = class extends import_obsidian.Plugin {
@@ -10867,7 +10887,8 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   
           누를 때 **그 카드 글 전체**를 읽어 보낸다(코드블록 줄은 빼고).
           블록 «안»에 글을 적으면 그게 이긴다 — 노트에서 여러 버튼을 따로 쓸 때를 위한 길이다.
-          `unit: 2.4` 를 블록 안에 적으면 어느 단위인지도 함께 간다(없으면 판 전체).
+          블록 «머리»의 설정 줄(`unit: 2.4` · `채널: 여기`)은 글이 아니라 설정이라 걷어낸다.
+          `채널:` 줄이 있으면 버튼 옆에 **채널 드롭다운**이 붙고, 고른 값이 요청에 함께 실린다.
   
        누르면 **서버에만** 요청 문서를 남긴다(ASK_DIR). 캔버스 파일은 안 건드린다 —
        판을 고쳐서 알리면 위 «열어 둔 캔버스» 문제를 그대로 지나기 때문이다.
@@ -10908,16 +10929,42 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     t = L.join("\n").trim();
     return t.replace(/^⟹\s*/, "").trim();
   }
-  renderAskBlock(src, el, ctx, kind) {
+  // 블록 «머리»의 `이름: 값` 줄을 걷어 { fields, rest } 로 준다. 서버 `pipeline_canvas.head_fields` 와 같은 규칙이다.
+  //  ⭐ 아는 이름이 «머리에서 이어지는 동안»만, 그리고 «값이 말이 될 때만» 걷는다.
+  //     `unit:` 하나만 걷던 때는 설정 줄을 하나라도 적어 두면 `inner` 가 비지 않아, 형이 카드에 적은
+  //     글을 아예 안 읽고 그 설정 줄 자체가 물음으로 올라갔다(0.5.47 까지의 버그).
+  askHeadFields(src) {
+    const fields = {};
     const lines = String(src || "").split("\n");
-    let unit = null;
-    if (lines.length && /^\s*unit\s*:/i.test(lines[0])) {
-      unit = lines.shift().replace(/^\s*unit\s*:/i, "").trim() || null;
+    let i = 0;
+    for (; i < lines.length; i++) {
+      const m = /^\s*([^\s:]+)\s*:\s*(.*)$/.exec(lines[i]);
+      if (!m) break;
+      const name = ASK_FIELDS[m[1].toLowerCase()];
+      if (!name) break;
+      const val = m[2].trim();
+      if (!ASK_FIELD_OK[name](val)) break;
+      fields[name] = val;
     }
-    const inner = lines.join("\n").trim();
+    return { fields, rest: lines.slice(i).join("\n") };
+  }
+  renderAskBlock(src, el, ctx, kind) {
+    const { fields, rest } = this.askHeadFields(src);
+    const unit = fields.unit || null;
+    const inner = rest.trim();
     const box = el.createDiv({ cls: "lpms-ask" + (kind === "run" ? " lpms-ask-run" : "") });
     if (kind === "ask" && inner) box.createDiv({ cls: "lpms-ask-text", text: inner });
-    const btn = box.createEl("button", { cls: "lpms-ask-btn", text: kind === "run" ? "\uB3CC\uB9AC\uAE30" : "\uBCF4\uB0B4\uAE30" });
+    const row = box.createDiv({ cls: "lpms-ask-row" });
+    const btn = row.createEl("button", { cls: "lpms-ask-btn", text: kind === "run" ? "\uB3CC\uB9AC\uAE30" : "\uBCF4\uB0B4\uAE30" });
+    let sel = null;
+    if (kind === "ask" && fields["\uCC44\uB110"] !== void 0) {
+      sel = row.createEl("select", { cls: "lpms-ask-ch" });
+      for (const [v, t] of [["\uC5EC\uAE30", "\uC5EC\uAE30"], ["vega", "Vega"]]) {
+        const o = sel.createEl("option", { text: t });
+        o.value = v;
+      }
+      sel.value = ASK_CHANNELS[fields["\uCC44\uB110"].trim().toLowerCase()] || "\uC5EC\uAE30";
+    }
     const note = box.createDiv({ cls: "lpms-ask-note", text: "" });
     btn.onclick = async () => {
       if (btn.disabled) return;
@@ -10926,7 +10973,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       const af = this.app.workspace.getActiveFile();
       const board = ctx && ctx.sourcePath || (af ? af.path : "");
       const text2 = inner || this.askCardText(el, ctx);
-      const r = await this.sendCanvasAsk({ board, kind, text: text2, unit });
+      const r = await this.sendCanvasAsk({ board, kind, text: text2, unit, channel: sel ? sel.value : null });
       note.setText(r.msg);
       if (!r.ok) {
         btn.disabled = false;
@@ -10941,7 +10988,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       }, 1e4);
     };
   }
-  async sendCanvasAsk({ board, kind, text: text2, unit }) {
+  async sendCanvasAsk({ board, kind, text: text2, unit, channel }) {
     if (!this.configured()) return { ok: false, msg: "\u26D4 \uB85C\uADF8\uC778\uBD80\uD130 \uD558\uC2ED\uC2DC\uC624" };
     if (kind === "ask" && !text2) return { ok: false, msg: "\u26D4 \uC774 \uCE74\uB4DC\uC5D0 \uBB3C\uC74C\uC744 \uC801\uACE0 \uB204\uB974\uC2ED\uC2DC\uC624" };
     const now = Date.now();
@@ -10951,6 +10998,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     const dev = this.settings.deviceId || "unknown";
     const p = `${ASK_DIR}/${at.replace(/[:.]/g, "-")}_${dev}`;
     const rec = { board: board || null, kind, text: text2 || "", unit: unit || null, at, device: dev };
+    if (channel) rec["\uCC44\uB110"] = channel;
     try {
       const id2 = this.idFor(p);
       const res = await this.req("PUT", this.docUrl(id2), {

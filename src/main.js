@@ -37,6 +37,16 @@ const DIAG_DIR = '60_System/_sync-diag';
 // 「열어 둔 캔버스」 문제(아래 canvasOpenPaths 주석)를 그대로 지나게 된다.
 const ASK_DIR = '60_System/_canvas-ask';
 const ASK_MAX_PER_HOUR = 6;   // 실수로 눌러대도 세션이 수십 개 뜨지 않게 (canvas_watch.py 와 같은 상한)
+// 블록 «머리»에 놓는 설정 줄. 이름과 «값이 말이 되는가»까지 서버 `pipeline_canvas.head_fields` 와 같게 둔다 —
+// 두 쪽이 다르게 걷으면 카드에 적은 글이 어느 한쪽에서 사라진다.
+const ASK_FIELDS = { unit: 'unit', '단위': 'unit', '채널': '채널', channel: '채널' };
+// 아는 채널 값 → 드롭다운에서 그것이 가리키는 항목. 이름표(어느 채널로 실제로 가나)는 서버
+// `pipeline_canvas.CHANNELS` 한 곳에만 두고, 여기는 «고를 수 있는 값인가»만 본다.
+const ASK_CHANNELS = { '': '여기', '여기': '여기', 'code': '여기', '기본': '여기', 'base': '여기',
+  '이 채널': '여기', 'vega': 'vega', '베가': 'vega', 'selim': 'vega', '셀림': 'vega', 'code-selim': 'vega' };
+// ⛔ 값까지 봐야 설정이다. 이름만 보면 형이 적은 「채널: 이 얘기는 어디서 하죠?」 가 설정으로 먹혀 물음이 사라진다.
+const ASK_FIELD_OK = { unit: (v) => /^\d+\.\d+$/.test(v),
+  '채널': (v) => Object.prototype.hasOwnProperty.call(ASK_CHANNELS, v.trim().toLowerCase()) };
 // ⛔ 아래 «그림·캔버스» 관련은 main-db(이 플러그인) 전용이다 — ai-study-sync 에는 «일부러» 넣지 않았다
 //    (형 지시 2026-08-13: 「ai-study-db는 해당 없으니 main-db에 한해서」). 그래서 두 소스의 차이가
 //    18줄에서 크게 벌어져 있다. 다음에 두 파일을 맞출 때 여기를 통째로 옮기면 그림·캔버스가
@@ -140,6 +150,8 @@ body.collab-canvassync-open .modal-close-button { display: none !important; }
 .lpms-ask-btn:hover:not(:disabled) { background: var(--interactive-accent-hover); }
 .lpms-ask-btn:disabled { opacity: .5; cursor: default; }
 .lpms-ask-run .lpms-ask-btn { background: var(--color-red, #d64545); border-color: var(--color-red, #d64545); }
+.lpms-ask-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.lpms-ask-ch { padding: 4px 8px; border-radius: 6px; font-size: 13px; }
 .lpms-ask-note { font-size: 12px; color: var(--text-muted); }
 `;
 
@@ -315,7 +327,8 @@ export default class VaultSyncCollab extends Plugin {
 
         누를 때 **그 카드 글 전체**를 읽어 보낸다(코드블록 줄은 빼고).
         블록 «안»에 글을 적으면 그게 이긴다 — 노트에서 여러 버튼을 따로 쓸 때를 위한 길이다.
-        `unit: 2.4` 를 블록 안에 적으면 어느 단위인지도 함께 간다(없으면 판 전체).
+        블록 «머리»의 설정 줄(`unit: 2.4` · `채널: 여기`)은 글이 아니라 설정이라 걷어낸다.
+        `채널:` 줄이 있으면 버튼 옆에 **채널 드롭다운**이 붙고, 고른 값이 요청에 함께 실린다.
 
      누르면 **서버에만** 요청 문서를 남긴다(ASK_DIR). 캔버스 파일은 안 건드린다 —
      판을 고쳐서 알리면 위 «열어 둔 캔버스» 문제를 그대로 지나기 때문이다.
@@ -354,14 +367,42 @@ export default class VaultSyncCollab extends Plugin {
     t = L.join('\n').trim();
     return t.replace(/^⟹\s*/, '').trim();               // 맨 앞 ⟹ 표시는 물음이 아니다
   }
+  // 블록 «머리»의 `이름: 값` 줄을 걷어 { fields, rest } 로 준다. 서버 `pipeline_canvas.head_fields` 와 같은 규칙이다.
+  //  ⭐ 아는 이름이 «머리에서 이어지는 동안»만, 그리고 «값이 말이 될 때만» 걷는다.
+  //     `unit:` 하나만 걷던 때는 설정 줄을 하나라도 적어 두면 `inner` 가 비지 않아, 형이 카드에 적은
+  //     글을 아예 안 읽고 그 설정 줄 자체가 물음으로 올라갔다(0.5.47 까지의 버그).
+  askHeadFields(src) {
+    const fields = {}; const lines = String(src || '').split('\n'); let i = 0;
+    for (; i < lines.length; i++) {
+      const m = /^\s*([^\s:]+)\s*:\s*(.*)$/.exec(lines[i]);
+      if (!m) break;
+      const name = ASK_FIELDS[m[1].toLowerCase()];
+      if (!name) break;
+      const val = m[2].trim();
+      if (!ASK_FIELD_OK[name](val)) break;   // 아는 이름인데 값이 아니면 설정이 아니라 그냥 글이다
+      fields[name] = val;
+    }
+    return { fields, rest: lines.slice(i).join('\n') };
+  }
   renderAskBlock(src, el, ctx, kind) {
-    const lines = String(src || '').split('\n');
-    let unit = null;
-    if (lines.length && /^\s*unit\s*:/i.test(lines[0])) { unit = lines.shift().replace(/^\s*unit\s*:/i, '').trim() || null; }
-    const inner = lines.join('\n').trim();   // 블록 «안»에 적은 글(있으면 이긴다)
+    const { fields, rest } = this.askHeadFields(src);
+    const unit = fields.unit || null;
+    const inner = rest.trim();   // 블록 «안»에 적은 글(있으면 이긴다)
     const box = el.createDiv({ cls: 'lpms-ask' + (kind === 'run' ? ' lpms-ask-run' : '') });
     if (kind === 'ask' && inner) box.createDiv({ cls: 'lpms-ask-text', text: inner });
-    const btn = box.createEl('button', { cls: 'lpms-ask-btn', text: kind === 'run' ? '돌리기' : '보내기' });
+    const row = box.createDiv({ cls: 'lpms-ask-row' });
+    const btn = row.createEl('button', { cls: 'lpms-ask-btn', text: kind === 'run' ? '돌리기' : '보내기' });
+    // 어느 채널로 보낼까 — 블록에 `채널:` 줄이 «있을 때만» 그린다. 그러면 카드가 스스로 「나는 채널을
+    // 고르는 카드다」라고 말하는 셈이라 플러그인이 카드 id 를 알 필요가 없다.
+    // ⛔ 돌리기(lpms-run)에는 안 붙인다 — 돌리는 것은 늘 이 채널이다.
+    let sel = null;
+    if (kind === 'ask' && fields['채널'] !== undefined) {
+      sel = row.createEl('select', { cls: 'lpms-ask-ch' });
+      for (const [v, t] of [['여기', '여기'], ['vega', 'Vega']]) {
+        const o = sel.createEl('option', { text: t }); o.value = v;
+      }
+      sel.value = ASK_CHANNELS[fields['채널'].trim().toLowerCase()] || '여기';
+    }
     // 빈칸으로 둔다 — 누른 뒤 «올리는 중…»·«✅ 올렸습니다»·«⛔ …» 가 여기로 나온다(상태 표시줄).
     const note = box.createDiv({ cls: 'lpms-ask-note', text: '' });
     btn.onclick = async () => {
@@ -371,14 +412,14 @@ export default class VaultSyncCollab extends Plugin {
       const board = (ctx && ctx.sourcePath) || (af ? af.path : '');
       // ⭐ 누를 때 읽는다 — 그려 놓고 나서 형이 이어 적은 것까지 담기게.
       const text = inner || this.askCardText(el, ctx);
-      const r = await this.sendCanvasAsk({ board, kind, text, unit });
+      const r = await this.sendCanvasAsk({ board, kind, text, unit, channel: sel ? sel.value : null });
       note.setText(r.msg);
       if (!r.ok) { btn.disabled = false; return; }
       // 다시 누를 수는 있게 하되 바로는 아니다 — 손이 두 번 가서 세션이 둘 뜨는 것을 막는다.
       setTimeout(() => { try { btn.disabled = false; btn.setText('다시 보내기'); } catch (e) {} }, 10000);
     };
   }
-  async sendCanvasAsk({ board, kind, text, unit }) {
+  async sendCanvasAsk({ board, kind, text, unit, channel }) {
     if (!this.configured()) return { ok: false, msg: '⛔ 로그인부터 하십시오' };
     if (kind === 'ask' && !text) return { ok: false, msg: '⛔ 이 카드에 물음을 적고 누르십시오' };
     const now = Date.now();
@@ -388,6 +429,9 @@ export default class VaultSyncCollab extends Plugin {
     const dev = this.settings.deviceId || 'unknown';
     const p = `${ASK_DIR}/${at.replace(/[:.]/g, '-')}_${dev}`;
     const rec = { board: board || null, kind, text: text || '', unit: unit || null, at, device: dev };
+    // 드롭다운으로 «고른» 값이라 서버는 이것을 블록에 적힌 값보다 먼저 본다(canvas_watch).
+    // 드롭다운이 없으면 아예 안 싣는다 — 그러면 서버가 블록/카드 글의 `채널:` 을 쓴다(예전 그대로).
+    if (channel) rec['채널'] = channel;
     try {
       const id = this.idFor(p);
       // content 에 JSON 문자열을 둔다 — 하네스가 vaultio.read(경로) 로 그대로 읽는다.
