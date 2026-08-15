@@ -408,6 +408,22 @@ export default class VaultSyncCollab extends Plugin {
     const v = seed ? seed['채널'] : undefined;
     return (v === undefined ? null : ASK_CHANNELS[String(v).trim().toLowerCase()]) || '여기';
   }
+  // 「생성」 단추를 그릴 자리인가.
+  //  ⭐ **캔버스임을 증명하지 못해도 그린다 — 노트(.md)인 것이 확실할 때만 뺀다.** (0.5.54)
+  //     전에는 `ctx.sourcePath` 가 `.canvas` 일 때«만» 그렸는데, 캔버스 카드에서는 그 값이
+  //     `.canvas` 로 안 온다 → 0.5.50~0.5.53 넉 판 동안 실기기에서 단추가 한 번도 안 나왔다.
+  //     이 파일은 이미 두 군데서 «캔버스에선 ctx 를 못 믿는다» 고 말하고 있다
+  //     (보내기의 `board` 물러섬 · `askCardText` ②의 DOM 되짚기). 여기만 하드 게이트였다.
+  //  ⛔ 그래서 어긋나는 방향을 뒤집는다 — 이제 잘못돼야 «노트에 쓸데없는 단추가 하나 보인다» 이고,
+  //     눌러도 `askAddCard` 가 판을 못 찾아 ⛔ 로 답하고 끝난다. 전에는 잘못되면 **캔버스에서
+  //     아예 못 썼다.**
+  askShowAdd(el, ctx) {
+    try { if (el && typeof el.closest === 'function' && el.closest('.canvas-node-content')) return true; }
+    catch (e) { console.error('[sync] askShowAdd', e); }
+    const p = (ctx && ctx.sourcePath) || '';
+    if (/\.canvas$/i.test(p)) return true;
+    return !/\.md$/i.test(p);   // 노트면 뺀다. 그 밖(빈 값·모르는 것)은 그린다.
+  }
   renderAskBlock(src, el, ctx, kind) {
     const { fields, rest } = this.askHeadFields(src);
     const seed = this.askSeedFields(fields, el, ctx);
@@ -430,7 +446,7 @@ export default class VaultSyncCollab extends Plugin {
     //     카드마다 라벨이 다르면(「+ 물음」·「+ 돌리기」…) 판에 카드 종류가 늘 때마다 이름이 늘어난다.
     //     무엇이 생기는지는 **누른 그 카드**가 이미 말하고 있다.
     //  ⛔ 캔버스에서만 붙는다 — 노트(.md)에는 놓을 판이 없어 눌러도 할 일이 없다.
-    const add = /\.canvas$/i.test((ctx && ctx.sourcePath) || '')
+    const add = this.askShowAdd(el, ctx)
       ? row.createEl('button', { cls: 'lpms-ask-btn lpms-ask-add', text: '생성' }) : null;
     // 빈칸으로 둔다 — 누른 뒤 «올리는 중…»·«✅ 올렸습니다»·«⛔ …» 가 여기로 나온다(상태 표시줄).
     const note = box.createDiv({ cls: 'lpms-ask-note', text: '' });
