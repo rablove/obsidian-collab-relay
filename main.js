@@ -10378,7 +10378,14 @@ var UPDATE_REPO = "rablove/obsidian-collab-relay";
 var DIAG_DIR = "60_System/_sync-diag";
 var ASK_DIR = "60_System/_canvas-ask";
 var ASK_MAX_PER_HOUR = 6;
-var ASK_FIELDS = { unit: "unit", "\uB2E8\uC704": "unit", "\uCC44\uB110": "\uCC44\uB110", channel: "\uCC44\uB110" };
+var ASK_FIELDS = {
+  unit: "unit",
+  "\uB2E8\uC704": "unit",
+  "\uCC44\uB110": "\uCC44\uB110",
+  channel: "\uCC44\uB110",
+  "\uC885\uB958": "\uC885\uB958",
+  kind: "\uC885\uB958"
+};
 var ASK_CHANNELS = {
   "": "\uC5EC\uAE30",
   "\uC5EC\uAE30": "\uC5EC\uAE30",
@@ -10392,9 +10399,12 @@ var ASK_CHANNELS = {
   "\uC140\uB9BC": "vega",
   "code-selim": "vega"
 };
+var ASK_KINDS = { "\uC0C8\uC2E4\uD5D8": 1, "\uC0C8 \uC2E4\uD5D8": 1, "newexp": 1 };
+var ASK_NEW_COLOR = "4";
 var ASK_FIELD_OK = {
   unit: (v) => /^\d+\.\d+$/.test(v),
-  "\uCC44\uB110": (v) => Object.prototype.hasOwnProperty.call(ASK_CHANNELS, v.trim().toLowerCase())
+  "\uCC44\uB110": (v) => Object.prototype.hasOwnProperty.call(ASK_CHANNELS, v.trim().toLowerCase()),
+  "\uC885\uB958": (v) => Object.prototype.hasOwnProperty.call(ASK_KINDS, v.trim())
 };
 var BIN_EXT = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", svg: "image/svg+xml" };
 var BIN_MAX = 2 * 1024 * 1024;
@@ -10950,24 +10960,27 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
     return { fields, rest: lines.slice(i).join("\n") };
   }
-  // 드롭다운의 «처음 값» — 블록 머리의 `채널:` 이 먼저, 없으면 **카드 글 머리**의 것, 그것도 없으면 `여기`.
-  //  ⭐ 카드 글까지 보는 까닭: 드롭다운이 늘 붙으면서 고른 값이 **늘 실리게** 됐다. 서버의
-  //     「요청에 안 실려 오면 블록/카드 글의 `채널:` 을 쓴다」 되짚기가 이 길에서는 더 안 돈다.
-  //     블록만 보면 카드 글에 `채널: vega` 를 적어 둔 판이 **조용히 여기로** 온다.
-  //     서버 `pipeline_canvas.card_body` 가 두 자리를 보는 차례와 같게 둔다.
-  askChannelSeed(fields, el, ctx) {
-    let v = fields["\uCC44\uB110"];
-    if (v === void 0) {
-      try {
-        v = this.askHeadFields(this.askCardText(el, ctx)).fields["\uCC44\uB110"];
-      } catch (e) {
-        console.error("[sync] askChannelSeed", e);
-      }
+  // 블록 머리에 설정이 없으면 **카드 글 머리**에서도 찾는다 — 서버 `pipeline_canvas.card_body` 와
+  // 같은 차례다(블록이 이긴다). 카드 글까지 보는 까닭: 블록이 비어 있는 카드에서 형이 쓸 수 있는
+  // 자리가 거기이고, 드롭다운이 늘 붙으면서 고른 값이 **늘 실리게** 돼 서버의 되짚기가 이 길에서는
+  // 더 안 돌기 때문이다. 블록만 보면 카드 글에 `채널: vega` 를 적어 둔 판이 **조용히 여기로** 온다.
+  askSeedFields(fields, el, ctx) {
+    let body = {};
+    try {
+      body = this.askHeadFields(this.askCardText(el, ctx)).fields;
+    } catch (e) {
+      console.error("[sync] askSeedFields", e);
     }
+    return Object.assign(body, fields);
+  }
+  // 드롭다운의 «처음 값» — 아는 값이면 그 항목, 아니면 `여기`.
+  askChannelSeed(seed) {
+    const v = seed ? seed["\uCC44\uB110"] : void 0;
     return (v === void 0 ? null : ASK_CHANNELS[String(v).trim().toLowerCase()]) || "\uC5EC\uAE30";
   }
   renderAskBlock(src, el, ctx, kind) {
     const { fields, rest } = this.askHeadFields(src);
+    const seed = this.askSeedFields(fields, el, ctx);
     const unit = fields.unit || null;
     const inner = rest.trim();
     const box = el.createDiv({ cls: "lpms-ask" + (kind === "run" ? " lpms-ask-run" : "") });
@@ -10979,7 +10992,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       const o = sel.createEl("option", { text: t });
       o.value = v;
     }
-    sel.value = this.askChannelSeed(fields, el, ctx);
+    sel.value = this.askChannelSeed(seed);
     const add = /\.canvas$/i.test(ctx && ctx.sourcePath || "") ? row.createEl("button", { cls: "lpms-ask-btn lpms-ask-add", text: "\uC0DD\uC131" }) : null;
     const note = box.createDiv({ cls: "lpms-ask-note", text: "" });
     btn.onclick = async () => {
@@ -10989,7 +11002,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       const af = this.app.workspace.getActiveFile();
       const board = ctx && ctx.sourcePath || (af ? af.path : "");
       const text2 = inner || this.askCardText(el, ctx);
-      const r = await this.sendCanvasAsk({ board, kind, text: text2, unit, channel: sel.value });
+      const r = await this.sendCanvasAsk({ board, kind, text: text2, unit, channel: sel.value, kind2: seed["\uC885\uB958"] });
       note.setText(r.msg);
       if (!r.ok) {
         btn.disabled = false;
@@ -11007,7 +11020,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       if (add.disabled) return;
       add.disabled = true;
       try {
-        note.setText(await this.askAddCard(el, fields, kind));
+        note.setText(await this.askAddCard(el, seed, kind));
       } finally {
         setTimeout(() => {
           try {
@@ -11026,10 +11039,13 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
      하나 더」다 — 글까지 베끼면 서버의 `find_question`(글로 카드를 되짚는다)이 둘을 못 가린다. */
   // 새 카드에 적을 글. 머리 설정(`unit:`·`채널:`)만 물려받고 본문은 없다.
   //  ⛔ 카드 제목(`# ▶ 돌리기` 같은 것)도 안 베낀다 — 본문을 비우는 것과 같은 까닭이다.
+  //  ⭐ `종류:` 도 물려준다 — 이게 있어야 [생성] 이 «새 실험 카드 한 장 더» 가 된다.
+  //     안 물려주면 새 카드는 그냥 빈 물음이라, 눌렀을 때 「판을 만들어 달라」가 물음으로 도착한다.
   askNewCardText(fields, kind) {
     const L = ["```lpms-" + (kind === "run" ? "run" : "ask")];
     if (fields && fields.unit) L.push("unit: " + fields.unit);
     if (fields && fields["\uCC44\uB110"]) L.push("\uCC44\uB110: " + fields["\uCC44\uB110"]);
+    if (fields && fields["\uC885\uB958"]) L.push("\uC885\uB958: " + fields["\uC885\uB958"]);
     L.push("```");
     return L.join("\n");
   }
@@ -11093,6 +11109,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     const { cv, node } = found;
     const spot = this.askFreeSpot(cv, node);
     const text2 = this.askNewCardText(fields, kind);
+    const color = fields && fields["\uC885\uB958"] ? ASK_NEW_COLOR : null;
     let made = null;
     try {
       if (typeof cv.createTextNode === "function") {
@@ -11110,6 +11127,13 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       made = null;
     }
     if (made) {
+      if (color) {
+        try {
+          if (typeof made.setColor === "function") made.setColor(color);
+          else if (typeof made.setData === "function") made.setData({ color });
+        } catch (e) {
+        }
+      }
       try {
         if (typeof cv.selectOnly === "function") cv.selectOnly(made);
       } catch (e) {
@@ -11126,7 +11150,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
     try {
       const d = cv.getData();
-      d.nodes.push({
+      const n = {
         id: this.canvasCardId(),
         type: "text",
         text: text2,
@@ -11134,7 +11158,9 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         y: spot.y,
         width: spot.width,
         height: spot.height
-      });
+      };
+      if (color) n.color = color;
+      d.nodes.push(n);
       cv.setData(d);
       if (typeof cv.requestSave === "function") cv.requestSave();
       return "\u2705 \uB193\uC558\uC2B5\uB2C8\uB2E4 (\uC774\uAC74 Ctrl+Z \uB85C \uC548 \uC9C0\uC6CC\uC9D1\uB2C8\uB2E4)";
@@ -11143,7 +11169,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       return "\u26D4 \uCE74\uB4DC\uB97C \uB193\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4";
     }
   }
-  async sendCanvasAsk({ board, kind, text: text2, unit, channel }) {
+  async sendCanvasAsk({ board, kind, text: text2, unit, channel, kind2 }) {
     if (!this.configured()) return { ok: false, msg: "\u26D4 \uB85C\uADF8\uC778\uBD80\uD130 \uD558\uC2ED\uC2DC\uC624" };
     if (kind === "ask" && !text2) return { ok: false, msg: "\u26D4 \uC774 \uCE74\uB4DC\uC5D0 \uBB3C\uC74C\uC744 \uC801\uACE0 \uB204\uB974\uC2ED\uC2DC\uC624" };
     const now = Date.now();
@@ -11154,6 +11180,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     const p = `${ASK_DIR}/${at.replace(/[:.]/g, "-")}_${dev}`;
     const rec = { board: board || null, kind, text: text2 || "", unit: unit || null, at, device: dev };
     if (channel) rec["\uCC44\uB110"] = channel;
+    if (kind2) rec["\uC885\uB958"] = kind2;
     try {
       const id2 = this.idFor(p);
       const res = await this.req("PUT", this.docUrl(id2), {

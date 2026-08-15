@@ -39,14 +39,21 @@ const ASK_DIR = '60_System/_canvas-ask';
 const ASK_MAX_PER_HOUR = 6;   // 실수로 눌러대도 세션이 수십 개 뜨지 않게 (canvas_watch.py 와 같은 상한)
 // 블록 «머리»에 놓는 설정 줄. 이름과 «값이 말이 되는가»까지 서버 `pipeline_canvas.head_fields` 와 같게 둔다 —
 // 두 쪽이 다르게 걷으면 카드에 적은 글이 어느 한쪽에서 사라진다.
-const ASK_FIELDS = { unit: 'unit', '단위': 'unit', '채널': '채널', channel: '채널' };
+const ASK_FIELDS = { unit: 'unit', '단위': 'unit', '채널': '채널', channel: '채널',
+  '종류': '종류', kind: '종류' };
 // 아는 채널 값 → 드롭다운에서 그것이 가리키는 항목. 이름표(어느 채널로 실제로 가나)는 서버
 // `pipeline_canvas.CHANNELS` 한 곳에만 두고, 여기는 «고를 수 있는 값인가»만 본다.
 const ASK_CHANNELS = { '': '여기', '여기': '여기', 'code': '여기', '기본': '여기', 'base': '여기',
   '이 채널': '여기', 'vega': 'vega', '베가': 'vega', 'selim': 'vega', '셀림': 'vega', 'code-selim': 'vega' };
+// 카드가 스스로 말하는 «나는 무슨 카드인가». 지금은 «새 실험»(판을 만들어 달라) 하나뿐이다.
+//  ⭐ 이걸 카드 글에 두는 까닭: 서버가 id(`doc-newexp`)로만 가리면 [생성]·복제로 나온 카드는 id 가
+//     무작위 hex 라 «새 실험» 이 조용히 그냥 물음이 된다. 서버 `pipeline_canvas.EXPREQ_KINDS` 와 같게 둔다.
+const ASK_KINDS = { '새실험': 1, '새 실험': 1, 'newexp': 1 };
+const ASK_NEW_COLOR = '4';   // 새 실험 카드는 초록으로 — 흰 카드면 판에서 안 갈린다
 // ⛔ 값까지 봐야 설정이다. 이름만 보면 형이 적은 「채널: 이 얘기는 어디서 하죠?」 가 설정으로 먹혀 물음이 사라진다.
 const ASK_FIELD_OK = { unit: (v) => /^\d+\.\d+$/.test(v),
-  '채널': (v) => Object.prototype.hasOwnProperty.call(ASK_CHANNELS, v.trim().toLowerCase()) };
+  '채널': (v) => Object.prototype.hasOwnProperty.call(ASK_CHANNELS, v.trim().toLowerCase()),
+  '종류': (v) => Object.prototype.hasOwnProperty.call(ASK_KINDS, v.trim()) };
 // ⛔ 아래 «그림·캔버스» 관련은 main-db(이 플러그인) 전용이다 — ai-study-sync 에는 «일부러» 넣지 않았다
 //    (형 지시 2026-08-13: 「ai-study-db는 해당 없으니 main-db에 한해서」). 그래서 두 소스의 차이가
 //    18줄에서 크게 벌어져 있다. 다음에 두 파일을 맞출 때 여기를 통째로 옮기면 그림·캔버스가
@@ -386,21 +393,24 @@ export default class VaultSyncCollab extends Plugin {
     }
     return { fields, rest: lines.slice(i).join('\n') };
   }
-  // 드롭다운의 «처음 값» — 블록 머리의 `채널:` 이 먼저, 없으면 **카드 글 머리**의 것, 그것도 없으면 `여기`.
-  //  ⭐ 카드 글까지 보는 까닭: 드롭다운이 늘 붙으면서 고른 값이 **늘 실리게** 됐다. 서버의
-  //     「요청에 안 실려 오면 블록/카드 글의 `채널:` 을 쓴다」 되짚기가 이 길에서는 더 안 돈다.
-  //     블록만 보면 카드 글에 `채널: vega` 를 적어 둔 판이 **조용히 여기로** 온다.
-  //     서버 `pipeline_canvas.card_body` 가 두 자리를 보는 차례와 같게 둔다.
-  askChannelSeed(fields, el, ctx) {
-    let v = fields['채널'];
-    if (v === undefined) {
-      try { v = this.askHeadFields(this.askCardText(el, ctx)).fields['채널']; }
-      catch (e) { console.error('[sync] askChannelSeed', e); }
-    }
+  // 블록 머리에 설정이 없으면 **카드 글 머리**에서도 찾는다 — 서버 `pipeline_canvas.card_body` 와
+  // 같은 차례다(블록이 이긴다). 카드 글까지 보는 까닭: 블록이 비어 있는 카드에서 형이 쓸 수 있는
+  // 자리가 거기이고, 드롭다운이 늘 붙으면서 고른 값이 **늘 실리게** 돼 서버의 되짚기가 이 길에서는
+  // 더 안 돌기 때문이다. 블록만 보면 카드 글에 `채널: vega` 를 적어 둔 판이 **조용히 여기로** 온다.
+  askSeedFields(fields, el, ctx) {
+    let body = {};
+    try { body = this.askHeadFields(this.askCardText(el, ctx)).fields; }
+    catch (e) { console.error('[sync] askSeedFields', e); }
+    return Object.assign(body, fields);
+  }
+  // 드롭다운의 «처음 값» — 아는 값이면 그 항목, 아니면 `여기`.
+  askChannelSeed(seed) {
+    const v = seed ? seed['채널'] : undefined;
     return (v === undefined ? null : ASK_CHANNELS[String(v).trim().toLowerCase()]) || '여기';
   }
   renderAskBlock(src, el, ctx, kind) {
     const { fields, rest } = this.askHeadFields(src);
+    const seed = this.askSeedFields(fields, el, ctx);
     const unit = fields.unit || null;
     const inner = rest.trim();   // 블록 «안»에 적은 글(있으면 이긴다)
     const box = el.createDiv({ cls: 'lpms-ask' + (kind === 'run' ? ' lpms-ask-run' : '') });
@@ -414,7 +424,7 @@ export default class VaultSyncCollab extends Plugin {
     for (const [v, t] of [['여기', '여기'], ['vega', 'Vega']]) {
       const o = sel.createEl('option', { text: t }); o.value = v;
     }
-    sel.value = this.askChannelSeed(fields, el, ctx);
+    sel.value = this.askChannelSeed(seed);
     // 「생성」 — 누르면 **누른 블록과 같은 종류**의 빈 카드가 바로 아래에 하나 더 생긴다.
     //  ⭐ 물음·돌리기 «둘 다» 에 붙고 라벨도 하나다 (형 지시 2026-08-15 — 「그냥 생성으로 통일」).
     //     카드마다 라벨이 다르면(「+ 물음」·「+ 돌리기」…) 판에 카드 종류가 늘 때마다 이름이 늘어난다.
@@ -431,7 +441,7 @@ export default class VaultSyncCollab extends Plugin {
       const board = (ctx && ctx.sourcePath) || (af ? af.path : '');
       // ⭐ 누를 때 읽는다 — 그려 놓고 나서 형이 이어 적은 것까지 담기게.
       const text = inner || this.askCardText(el, ctx);
-      const r = await this.sendCanvasAsk({ board, kind, text, unit, channel: sel.value });
+      const r = await this.sendCanvasAsk({ board, kind, text, unit, channel: sel.value, kind2: seed['종류'] });
       note.setText(r.msg);
       if (!r.ok) { btn.disabled = false; return; }
       // 다시 누를 수는 있게 하되 바로는 아니다 — 손이 두 번 가서 세션이 둘 뜨는 것을 막는다.
@@ -440,7 +450,7 @@ export default class VaultSyncCollab extends Plugin {
     if (add) add.onclick = async () => {
       if (add.disabled) return;
       add.disabled = true;
-      try { note.setText(await this.askAddCard(el, fields, kind)); }
+      try { note.setText(await this.askAddCard(el, seed, kind)); }
       finally { setTimeout(() => { try { add.disabled = false; } catch (e) {} }, 400); }
     };
   }
@@ -452,10 +462,13 @@ export default class VaultSyncCollab extends Plugin {
      하나 더」다 — 글까지 베끼면 서버의 `find_question`(글로 카드를 되짚는다)이 둘을 못 가린다. */
   // 새 카드에 적을 글. 머리 설정(`unit:`·`채널:`)만 물려받고 본문은 없다.
   //  ⛔ 카드 제목(`# ▶ 돌리기` 같은 것)도 안 베낀다 — 본문을 비우는 것과 같은 까닭이다.
+  //  ⭐ `종류:` 도 물려준다 — 이게 있어야 [생성] 이 «새 실험 카드 한 장 더» 가 된다.
+  //     안 물려주면 새 카드는 그냥 빈 물음이라, 눌렀을 때 「판을 만들어 달라」가 물음으로 도착한다.
   askNewCardText(fields, kind) {
     const L = ['```lpms-' + (kind === 'run' ? 'run' : 'ask')];
     if (fields && fields.unit) L.push('unit: ' + fields.unit);
     if (fields && fields['채널']) L.push('채널: ' + fields['채널']);
+    if (fields && fields['종류']) L.push('종류: ' + fields['종류']);
     L.push('```');
     return L.join('\n');
   }
@@ -511,6 +524,8 @@ export default class VaultSyncCollab extends Plugin {
     const { cv, node } = found;
     const spot = this.askFreeSpot(cv, node);
     const text = this.askNewCardText(fields, kind);
+    // `종류:` 가 있는 카드(지금은 «새 실험» 뿐)는 초록으로 — 흰 카드로 나면 판에서 안 갈린다.
+    const color = fields && fields['종류'] ? ASK_NEW_COLOR : null;
     let made = null;
     try {
       if (typeof cv.createTextNode === 'function') {
@@ -523,6 +538,11 @@ export default class VaultSyncCollab extends Plugin {
     } catch (e) { console.error('[sync] askAddCard(createTextNode)', e); made = null; }
     if (made) {
       // 고른 상태로 둔다 — 형이 곧바로 적을 수 있게. 편집까지 열리면 더 좋다(없는 판도 있어 감싼다).
+      // 색은 만든 뒤에 준다 — `createTextNode` 는 색 인자를 안 받는다(판마다 손잡이가 달라 감싼다).
+      if (color) {
+        try { if (typeof made.setColor === 'function') made.setColor(color);
+              else if (typeof made.setData === 'function') made.setData({ color }); } catch (e) {}
+      }
       try { if (typeof cv.selectOnly === 'function') cv.selectOnly(made); } catch (e) {}
       try { if (typeof made.startEditing === 'function') made.startEditing(); } catch (e) {}
       try { if (typeof cv.requestSave === 'function') cv.requestSave(); } catch (e) {}
@@ -531,14 +551,16 @@ export default class VaultSyncCollab extends Plugin {
     // 물러설 자리 — 판 데이터에 직접 넣고 화면을 갈아 끼운다. 이 길은 Ctrl+Z 가 안 먹는다(그래서 그리 적는다).
     try {
       const d = cv.getData();
-      d.nodes.push({ id: this.canvasCardId(), type: 'text', text,
-                     x: spot.x, y: spot.y, width: spot.width, height: spot.height });
+      const n = { id: this.canvasCardId(), type: 'text', text,
+                  x: spot.x, y: spot.y, width: spot.width, height: spot.height };
+      if (color) n.color = color;
+      d.nodes.push(n);
       cv.setData(d);
       if (typeof cv.requestSave === 'function') cv.requestSave();
       return '✅ 놓았습니다 (이건 Ctrl+Z 로 안 지워집니다)';
     } catch (e) { console.error('[sync] askAddCard(setData)', e); return '⛔ 카드를 놓지 못했습니다'; }
   }
-  async sendCanvasAsk({ board, kind, text, unit, channel }) {
+  async sendCanvasAsk({ board, kind, text, unit, channel, kind2 }) {
     if (!this.configured()) return { ok: false, msg: '⛔ 로그인부터 하십시오' };
     if (kind === 'ask' && !text) return { ok: false, msg: '⛔ 이 카드에 물음을 적고 누르십시오' };
     const now = Date.now();
@@ -552,6 +574,9 @@ export default class VaultSyncCollab extends Plugin {
     // 0.5.49 부터 드롭다운이 늘 있어 이 값도 늘 실린다 — 그래서 처음 값을 블록뿐 아니라
     // 카드 글에서도 읽는다(askChannelSeed). 옛 기기·다른 길로 안 실려 오면 서버가 되짚는다.
     if (channel) rec['채널'] = channel;
+    // ⭐ «나는 무슨 카드인가» 도 함께 싣는다 — 서버가 판을 못 읽는 경우까지 곧게 갈린다.
+    //    안 실으면 서버가 판에서 그 카드를 찾아 카드 글의 `종류:` 를 본다(되긴 하나 한 다리 건넌다).
+    if (kind2) rec['종류'] = kind2;
     try {
       const id = this.idFor(p);
       // content 에 JSON 문자열을 둔다 — 하네스가 vaultio.read(경로) 로 그대로 읽는다.
