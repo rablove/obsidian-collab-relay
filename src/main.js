@@ -328,7 +328,7 @@ export default class VaultSyncCollab extends Plugin {
         누를 때 **그 카드 글 전체**를 읽어 보낸다(코드블록 줄은 빼고).
         블록 «안»에 글을 적으면 그게 이긴다 — 노트에서 여러 버튼을 따로 쓸 때를 위한 길이다.
         블록 «머리»의 설정 줄(`unit: 2.4` · `채널: 여기`)은 글이 아니라 설정이라 걷어낸다.
-        `채널:` 줄이 있으면 버튼 옆에 **채널 드롭다운**이 붙고, 고른 값이 요청에 함께 실린다.
+        버튼 옆에는 **채널 드롭다운**이 늘 붙고(물음·돌리기 둘 다), 고른 값이 요청에 함께 실린다.
 
      누르면 **서버에만** 요청 문서를 남긴다(ASK_DIR). 캔버스 파일은 안 건드린다 —
      판을 고쳐서 알리면 위 «열어 둔 캔버스» 문제를 그대로 지나기 때문이다.
@@ -384,6 +384,19 @@ export default class VaultSyncCollab extends Plugin {
     }
     return { fields, rest: lines.slice(i).join('\n') };
   }
+  // 드롭다운의 «처음 값» — 블록 머리의 `채널:` 이 먼저, 없으면 **카드 글 머리**의 것, 그것도 없으면 `여기`.
+  //  ⭐ 카드 글까지 보는 까닭: 드롭다운이 늘 붙으면서 고른 값이 **늘 실리게** 됐다. 서버의
+  //     「요청에 안 실려 오면 블록/카드 글의 `채널:` 을 쓴다」 되짚기가 이 길에서는 더 안 돈다.
+  //     블록만 보면 카드 글에 `채널: vega` 를 적어 둔 판이 **조용히 여기로** 온다.
+  //     서버 `pipeline_canvas.card_body` 가 두 자리를 보는 차례와 같게 둔다.
+  askChannelSeed(fields, el, ctx) {
+    let v = fields['채널'];
+    if (v === undefined) {
+      try { v = this.askHeadFields(this.askCardText(el, ctx)).fields['채널']; }
+      catch (e) { console.error('[sync] askChannelSeed', e); }
+    }
+    return (v === undefined ? null : ASK_CHANNELS[String(v).trim().toLowerCase()]) || '여기';
+  }
   renderAskBlock(src, el, ctx, kind) {
     const { fields, rest } = this.askHeadFields(src);
     const unit = fields.unit || null;
@@ -392,17 +405,14 @@ export default class VaultSyncCollab extends Plugin {
     if (kind === 'ask' && inner) box.createDiv({ cls: 'lpms-ask-text', text: inner });
     const row = box.createDiv({ cls: 'lpms-ask-row' });
     const btn = row.createEl('button', { cls: 'lpms-ask-btn', text: kind === 'run' ? '돌리기' : '보내기' });
-    // 어느 채널로 보낼까 — 블록에 `채널:` 줄이 «있을 때만» 그린다. 그러면 카드가 스스로 「나는 채널을
-    // 고르는 카드다」라고 말하는 셈이라 플러그인이 카드 id 를 알 필요가 없다.
-    // ⛔ 돌리기(lpms-run)에는 안 붙인다 — 돌리는 것은 늘 이 채널이다.
-    let sel = null;
-    if (kind === 'ask' && fields['채널'] !== undefined) {
-      sel = row.createEl('select', { cls: 'lpms-ask-ch' });
-      for (const [v, t] of [['여기', '여기'], ['vega', 'Vega']]) {
-        const o = sel.createEl('option', { text: t }); o.value = v;
-      }
-      sel.value = ASK_CHANNELS[fields['채널'].trim().toLowerCase()] || '여기';
+    // 어느 채널로 보낼까 — **늘 그린다**(물음·돌리기 둘 다, 형 지시 2026-08-15).
+    // 돌리기에도 붙는 까닭: 쌍둥이 채널(#code ↔ #code-selim)은 계정이 달라 한도를 나눠 쓰는 자리라
+    // 「이 스윕은 저쪽 계정에서 돌려라」가 뜻이 있다.
+    const sel = row.createEl('select', { cls: 'lpms-ask-ch' });
+    for (const [v, t] of [['여기', '여기'], ['vega', 'Vega']]) {
+      const o = sel.createEl('option', { text: t }); o.value = v;
     }
+    sel.value = this.askChannelSeed(fields, el, ctx);
     // 빈칸으로 둔다 — 누른 뒤 «올리는 중…»·«✅ 올렸습니다»·«⛔ …» 가 여기로 나온다(상태 표시줄).
     const note = box.createDiv({ cls: 'lpms-ask-note', text: '' });
     btn.onclick = async () => {
@@ -412,7 +422,7 @@ export default class VaultSyncCollab extends Plugin {
       const board = (ctx && ctx.sourcePath) || (af ? af.path : '');
       // ⭐ 누를 때 읽는다 — 그려 놓고 나서 형이 이어 적은 것까지 담기게.
       const text = inner || this.askCardText(el, ctx);
-      const r = await this.sendCanvasAsk({ board, kind, text, unit, channel: sel ? sel.value : null });
+      const r = await this.sendCanvasAsk({ board, kind, text, unit, channel: sel.value });
       note.setText(r.msg);
       if (!r.ok) { btn.disabled = false; return; }
       // 다시 누를 수는 있게 하되 바로는 아니다 — 손이 두 번 가서 세션이 둘 뜨는 것을 막는다.
@@ -430,7 +440,8 @@ export default class VaultSyncCollab extends Plugin {
     const p = `${ASK_DIR}/${at.replace(/[:.]/g, '-')}_${dev}`;
     const rec = { board: board || null, kind, text: text || '', unit: unit || null, at, device: dev };
     // 드롭다운으로 «고른» 값이라 서버는 이것을 블록에 적힌 값보다 먼저 본다(canvas_watch).
-    // 드롭다운이 없으면 아예 안 싣는다 — 그러면 서버가 블록/카드 글의 `채널:` 을 쓴다(예전 그대로).
+    // 0.5.49 부터 드롭다운이 늘 있어 이 값도 늘 실린다 — 그래서 처음 값을 블록뿐 아니라
+    // 카드 글에서도 읽는다(askChannelSeed). 옛 기기·다른 길로 안 실려 오면 서버가 되짚는다.
     if (channel) rec['채널'] = channel;
     try {
       const id = this.idFor(p);

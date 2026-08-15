@@ -10888,7 +10888,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
           누를 때 **그 카드 글 전체**를 읽어 보낸다(코드블록 줄은 빼고).
           블록 «안»에 글을 적으면 그게 이긴다 — 노트에서 여러 버튼을 따로 쓸 때를 위한 길이다.
           블록 «머리»의 설정 줄(`unit: 2.4` · `채널: 여기`)은 글이 아니라 설정이라 걷어낸다.
-          `채널:` 줄이 있으면 버튼 옆에 **채널 드롭다운**이 붙고, 고른 값이 요청에 함께 실린다.
+          버튼 옆에는 **채널 드롭다운**이 늘 붙고(물음·돌리기 둘 다), 고른 값이 요청에 함께 실린다.
   
        누르면 **서버에만** 요청 문서를 남긴다(ASK_DIR). 캔버스 파일은 안 건드린다 —
        판을 고쳐서 알리면 위 «열어 둔 캔버스» 문제를 그대로 지나기 때문이다.
@@ -10948,6 +10948,22 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
     return { fields, rest: lines.slice(i).join("\n") };
   }
+  // 드롭다운의 «처음 값» — 블록 머리의 `채널:` 이 먼저, 없으면 **카드 글 머리**의 것, 그것도 없으면 `여기`.
+  //  ⭐ 카드 글까지 보는 까닭: 드롭다운이 늘 붙으면서 고른 값이 **늘 실리게** 됐다. 서버의
+  //     「요청에 안 실려 오면 블록/카드 글의 `채널:` 을 쓴다」 되짚기가 이 길에서는 더 안 돈다.
+  //     블록만 보면 카드 글에 `채널: vega` 를 적어 둔 판이 **조용히 여기로** 온다.
+  //     서버 `pipeline_canvas.card_body` 가 두 자리를 보는 차례와 같게 둔다.
+  askChannelSeed(fields, el, ctx) {
+    let v = fields["\uCC44\uB110"];
+    if (v === void 0) {
+      try {
+        v = this.askHeadFields(this.askCardText(el, ctx)).fields["\uCC44\uB110"];
+      } catch (e) {
+        console.error("[sync] askChannelSeed", e);
+      }
+    }
+    return (v === void 0 ? null : ASK_CHANNELS[String(v).trim().toLowerCase()]) || "\uC5EC\uAE30";
+  }
   renderAskBlock(src, el, ctx, kind) {
     const { fields, rest } = this.askHeadFields(src);
     const unit = fields.unit || null;
@@ -10956,15 +10972,12 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     if (kind === "ask" && inner) box.createDiv({ cls: "lpms-ask-text", text: inner });
     const row = box.createDiv({ cls: "lpms-ask-row" });
     const btn = row.createEl("button", { cls: "lpms-ask-btn", text: kind === "run" ? "\uB3CC\uB9AC\uAE30" : "\uBCF4\uB0B4\uAE30" });
-    let sel = null;
-    if (kind === "ask" && fields["\uCC44\uB110"] !== void 0) {
-      sel = row.createEl("select", { cls: "lpms-ask-ch" });
-      for (const [v, t] of [["\uC5EC\uAE30", "\uC5EC\uAE30"], ["vega", "Vega"]]) {
-        const o = sel.createEl("option", { text: t });
-        o.value = v;
-      }
-      sel.value = ASK_CHANNELS[fields["\uCC44\uB110"].trim().toLowerCase()] || "\uC5EC\uAE30";
+    const sel = row.createEl("select", { cls: "lpms-ask-ch" });
+    for (const [v, t] of [["\uC5EC\uAE30", "\uC5EC\uAE30"], ["vega", "Vega"]]) {
+      const o = sel.createEl("option", { text: t });
+      o.value = v;
     }
+    sel.value = this.askChannelSeed(fields, el, ctx);
     const note = box.createDiv({ cls: "lpms-ask-note", text: "" });
     btn.onclick = async () => {
       if (btn.disabled) return;
@@ -10973,7 +10986,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       const af = this.app.workspace.getActiveFile();
       const board = ctx && ctx.sourcePath || (af ? af.path : "");
       const text2 = inner || this.askCardText(el, ctx);
-      const r = await this.sendCanvasAsk({ board, kind, text: text2, unit, channel: sel ? sel.value : null });
+      const r = await this.sendCanvasAsk({ board, kind, text: text2, unit, channel: sel.value });
       note.setText(r.msg);
       if (!r.ok) {
         btn.disabled = false;
