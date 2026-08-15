@@ -415,11 +415,13 @@ export default class VaultSyncCollab extends Plugin {
       const o = sel.createEl('option', { text: t }); o.value = v;
     }
     sel.value = this.askChannelSeed(fields, el, ctx);
-    // 「+ 물음」 — 누르면 같은 종류의 빈 물음 카드가 바로 아래에 하나 더 생긴다 (형 지시 2026-08-15).
-    // ⛔ `lpms-run` 에는 안 붙는다(드롭다운과 다른 기준 — 돌리기 카드를 복제할 일이 없다).
-    // ⛔ 캔버스에서만 붙는다 — 노트(.md)에는 놓을 판이 없어 눌러도 할 일이 없다.
-    const add = (kind === 'ask' && /\.canvas$/i.test((ctx && ctx.sourcePath) || ''))
-      ? row.createEl('button', { cls: 'lpms-ask-btn lpms-ask-add', text: '+ 물음' }) : null;
+    // 「생성」 — 누르면 **누른 블록과 같은 종류**의 빈 카드가 바로 아래에 하나 더 생긴다.
+    //  ⭐ 물음·돌리기 «둘 다» 에 붙고 라벨도 하나다 (형 지시 2026-08-15 — 「그냥 생성으로 통일」).
+    //     카드마다 라벨이 다르면(「+ 물음」·「+ 돌리기」…) 판에 카드 종류가 늘 때마다 이름이 늘어난다.
+    //     무엇이 생기는지는 **누른 그 카드**가 이미 말하고 있다.
+    //  ⛔ 캔버스에서만 붙는다 — 노트(.md)에는 놓을 판이 없어 눌러도 할 일이 없다.
+    const add = /\.canvas$/i.test((ctx && ctx.sourcePath) || '')
+      ? row.createEl('button', { cls: 'lpms-ask-btn lpms-ask-add', text: '생성' }) : null;
     // 빈칸으로 둔다 — 누른 뒤 «올리는 중…»·«✅ 올렸습니다»·«⛔ …» 가 여기로 나온다(상태 표시줄).
     const note = box.createDiv({ cls: 'lpms-ask-note', text: '' });
     btn.onclick = async () => {
@@ -438,19 +440,20 @@ export default class VaultSyncCollab extends Plugin {
     if (add) add.onclick = async () => {
       if (add.disabled) return;
       add.disabled = true;
-      try { note.setText(await this.askAddCard(el, fields)); }
+      try { note.setText(await this.askAddCard(el, fields, kind)); }
       finally { setTimeout(() => { try { add.disabled = false; } catch (e) {} }, 400); }
     };
   }
-  /* ── 「+ 물음」 — 빈 물음 카드를 한 장 더 놓는다 (형 지시 2026-08-15) ───────────────
+  /* ── 「생성」 — 같은 종류의 빈 카드를 한 장 더 놓는다 (형 지시 2026-08-15) ─────────
      ⭐ **이건 위 «캔버스 파일은 안 건드린다»와 안 어긋난다.** 그 규칙은 «서버가 형이 열어 둔 판을
         되쓰면 어긋난다» 는 얘기다. 여기서는 서버가 안 낀다 — `reloadCanvas` 가 쓰는 그 손잡이
         (`leaf.view.canvas`)로 **형이 직접** 놓는 것이라 카드를 손으로 끌어 놓는 것과 같은 길이다.
      글은 **누른 카드의 블록 머리 설정만 물려받고 본문은 비운다.** 복제가 아니라 「같은 종류의 빈 카드
      하나 더」다 — 글까지 베끼면 서버의 `find_question`(글로 카드를 되짚는다)이 둘을 못 가린다. */
   // 새 카드에 적을 글. 머리 설정(`unit:`·`채널:`)만 물려받고 본문은 없다.
-  askNewCardText(fields) {
-    const L = ['```lpms-ask'];
+  //  ⛔ 카드 제목(`# ▶ 돌리기` 같은 것)도 안 베낀다 — 본문을 비우는 것과 같은 까닭이다.
+  askNewCardText(fields, kind) {
+    const L = ['```lpms-' + (kind === 'run' ? 'run' : 'ask')];
     if (fields && fields.unit) L.push('unit: ' + fields.unit);
     if (fields && fields['채널']) L.push('채널: ' + fields['채널']);
     L.push('```');
@@ -502,12 +505,12 @@ export default class VaultSyncCollab extends Plugin {
     }
     return { x, y, width: w, height: h };
   }
-  async askAddCard(el, fields) {
+  async askAddCard(el, fields, kind) {
     const found = this.canvasCardOf(el);
     if (!found) return '⛔ 이 카드가 놓인 판을 못 찾았습니다';
     const { cv, node } = found;
     const spot = this.askFreeSpot(cv, node);
-    const text = this.askNewCardText(fields);
+    const text = this.askNewCardText(fields, kind);
     let made = null;
     try {
       if (typeof cv.createTextNode === 'function') {
@@ -523,7 +526,7 @@ export default class VaultSyncCollab extends Plugin {
       try { if (typeof cv.selectOnly === 'function') cv.selectOnly(made); } catch (e) {}
       try { if (typeof made.startEditing === 'function') made.startEditing(); } catch (e) {}
       try { if (typeof cv.requestSave === 'function') cv.requestSave(); } catch (e) {}
-      return '✅ 빈 물음 카드를 놓았습니다';
+      return '✅ 빈 카드를 놓았습니다';
     }
     // 물러설 자리 — 판 데이터에 직접 넣고 화면을 갈아 끼운다. 이 길은 Ctrl+Z 가 안 먹는다(그래서 그리 적는다).
     try {

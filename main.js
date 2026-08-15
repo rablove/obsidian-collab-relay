@@ -10980,7 +10980,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       o.value = v;
     }
     sel.value = this.askChannelSeed(fields, el, ctx);
-    const add = kind === "ask" && /\.canvas$/i.test(ctx && ctx.sourcePath || "") ? row.createEl("button", { cls: "lpms-ask-btn lpms-ask-add", text: "+ \uBB3C\uC74C" }) : null;
+    const add = /\.canvas$/i.test(ctx && ctx.sourcePath || "") ? row.createEl("button", { cls: "lpms-ask-btn lpms-ask-add", text: "\uC0DD\uC131" }) : null;
     const note = box.createDiv({ cls: "lpms-ask-note", text: "" });
     btn.onclick = async () => {
       if (btn.disabled) return;
@@ -11007,7 +11007,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       if (add.disabled) return;
       add.disabled = true;
       try {
-        note.setText(await this.askAddCard(el, fields));
+        note.setText(await this.askAddCard(el, fields, kind));
       } finally {
         setTimeout(() => {
           try {
@@ -11018,15 +11018,16 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       }
     };
   }
-  /* ── 「+ 물음」 — 빈 물음 카드를 한 장 더 놓는다 (형 지시 2026-08-15) ───────────────
+  /* ── 「생성」 — 같은 종류의 빈 카드를 한 장 더 놓는다 (형 지시 2026-08-15) ─────────
      ⭐ **이건 위 «캔버스 파일은 안 건드린다»와 안 어긋난다.** 그 규칙은 «서버가 형이 열어 둔 판을
         되쓰면 어긋난다» 는 얘기다. 여기서는 서버가 안 낀다 — `reloadCanvas` 가 쓰는 그 손잡이
         (`leaf.view.canvas`)로 **형이 직접** 놓는 것이라 카드를 손으로 끌어 놓는 것과 같은 길이다.
      글은 **누른 카드의 블록 머리 설정만 물려받고 본문은 비운다.** 복제가 아니라 「같은 종류의 빈 카드
      하나 더」다 — 글까지 베끼면 서버의 `find_question`(글로 카드를 되짚는다)이 둘을 못 가린다. */
   // 새 카드에 적을 글. 머리 설정(`unit:`·`채널:`)만 물려받고 본문은 없다.
-  askNewCardText(fields) {
-    const L = ["```lpms-ask"];
+  //  ⛔ 카드 제목(`# ▶ 돌리기` 같은 것)도 안 베낀다 — 본문을 비우는 것과 같은 까닭이다.
+  askNewCardText(fields, kind) {
+    const L = ["```lpms-" + (kind === "run" ? "run" : "ask")];
     if (fields && fields.unit) L.push("unit: " + fields.unit);
     if (fields && fields["\uCC44\uB110"]) L.push("\uCC44\uB110: " + fields["\uCC44\uB110"]);
     L.push("```");
@@ -11086,12 +11087,12 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
     return { x, y, width: w, height: h };
   }
-  async askAddCard(el, fields) {
+  async askAddCard(el, fields, kind) {
     const found = this.canvasCardOf(el);
     if (!found) return "\u26D4 \uC774 \uCE74\uB4DC\uAC00 \uB193\uC778 \uD310\uC744 \uBABB \uCC3E\uC558\uC2B5\uB2C8\uB2E4";
     const { cv, node } = found;
     const spot = this.askFreeSpot(cv, node);
-    const text2 = this.askNewCardText(fields);
+    const text2 = this.askNewCardText(fields, kind);
     let made = null;
     try {
       if (typeof cv.createTextNode === "function") {
@@ -11121,7 +11122,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         if (typeof cv.requestSave === "function") cv.requestSave();
       } catch (e) {
       }
-      return "\u2705 \uBE48 \uBB3C\uC74C \uCE74\uB4DC\uB97C \uB193\uC558\uC2B5\uB2C8\uB2E4";
+      return "\u2705 \uBE48 \uCE74\uB4DC\uB97C \uB193\uC558\uC2B5\uB2C8\uB2E4";
     }
     try {
       const d = cv.getData();
