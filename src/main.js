@@ -152,6 +152,8 @@ body.collab-canvassync-open .modal-close-button { display: none !important; }
 .lpms-ask-run .lpms-ask-btn { background: var(--color-red, #d64545); border-color: var(--color-red, #d64545); }
 .lpms-ask-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .lpms-ask-ch { padding: 4px 8px; border-radius: 6px; font-size: 13px; }
+.lpms-ask-add { background: transparent; color: var(--text-normal); border-color: var(--background-modifier-border); }
+.lpms-ask-add:hover:not(:disabled) { background: var(--background-modifier-hover); }
 .lpms-ask-note { font-size: 12px; color: var(--text-muted); }
 `;
 
@@ -413,6 +415,11 @@ export default class VaultSyncCollab extends Plugin {
       const o = sel.createEl('option', { text: t }); o.value = v;
     }
     sel.value = this.askChannelSeed(fields, el, ctx);
+    // 「+ 물음」 — 누르면 같은 종류의 빈 물음 카드가 바로 아래에 하나 더 생긴다 (형 지시 2026-08-15).
+    // ⛔ `lpms-run` 에는 안 붙는다(드롭다운과 다른 기준 — 돌리기 카드를 복제할 일이 없다).
+    // ⛔ 캔버스에서만 붙는다 — 노트(.md)에는 놓을 판이 없어 눌러도 할 일이 없다.
+    const add = (kind === 'ask' && /\.canvas$/i.test((ctx && ctx.sourcePath) || ''))
+      ? row.createEl('button', { cls: 'lpms-ask-btn lpms-ask-add', text: '+ 물음' }) : null;
     // 빈칸으로 둔다 — 누른 뒤 «올리는 중…»·«✅ 올렸습니다»·«⛔ …» 가 여기로 나온다(상태 표시줄).
     const note = box.createDiv({ cls: 'lpms-ask-note', text: '' });
     btn.onclick = async () => {
@@ -428,6 +435,105 @@ export default class VaultSyncCollab extends Plugin {
       // 다시 누를 수는 있게 하되 바로는 아니다 — 손이 두 번 가서 세션이 둘 뜨는 것을 막는다.
       setTimeout(() => { try { btn.disabled = false; btn.setText('다시 보내기'); } catch (e) {} }, 10000);
     };
+    if (add) add.onclick = async () => {
+      if (add.disabled) return;
+      add.disabled = true;
+      try { note.setText(await this.askAddCard(el, fields)); }
+      finally { setTimeout(() => { try { add.disabled = false; } catch (e) {} }, 400); }
+    };
+  }
+  /* ── 「+ 물음」 — 빈 물음 카드를 한 장 더 놓는다 (형 지시 2026-08-15) ───────────────
+     ⭐ **이건 위 «캔버스 파일은 안 건드린다»와 안 어긋난다.** 그 규칙은 «서버가 형이 열어 둔 판을
+        되쓰면 어긋난다» 는 얘기다. 여기서는 서버가 안 낀다 — `reloadCanvas` 가 쓰는 그 손잡이
+        (`leaf.view.canvas`)로 **형이 직접** 놓는 것이라 카드를 손으로 끌어 놓는 것과 같은 길이다.
+     글은 **누른 카드의 블록 머리 설정만 물려받고 본문은 비운다.** 복제가 아니라 「같은 종류의 빈 카드
+     하나 더」다 — 글까지 베끼면 서버의 `find_question`(글로 카드를 되짚는다)이 둘을 못 가린다. */
+  // 새 카드에 적을 글. 머리 설정(`unit:`·`채널:`)만 물려받고 본문은 없다.
+  askNewCardText(fields) {
+    const L = ['```lpms-ask'];
+    if (fields && fields.unit) L.push('unit: ' + fields.unit);
+    if (fields && fields['채널']) L.push('채널: ' + fields['채널']);
+    L.push('```');
+    return L.join('\n');
+  }
+  // 옵시디언이 카드에 붙이는 것과 같은 «무작위 16자리 hex».
+  //  ⛔ `unit-`·`alt-`·`doc-`·`ans-`·`q-`·`part-` 로 시작하면 안 된다 — 도구(`pipeline_canvas._MINE`)가
+  //     쓰는 자리라 겹치면 나중에 도구가 만든 카드와 id 가 부딪힌다. hex 에는 `-` 가 없어 안 겹친다.
+  canvasCardId() {
+    let s = '';
+    try {
+      const c = (typeof crypto !== 'undefined' && crypto && crypto.getRandomValues) ? crypto : null;
+      if (c) { const b = new Uint8Array(8); c.getRandomValues(b);
+               for (const x of b) s += x.toString(16).padStart(2, '0'); }
+    } catch (e) { s = ''; }
+    while (s.length < 16) s += Math.floor(Math.random() * 16).toString(16);
+    return s.slice(0, 16);
+  }
+  // 이 코드블록이 놓인 «캔버스 카드»를 찾는다 → { cv: 판 손잡이, node: 그 카드 }.
+  canvasCardOf(el) {
+    if (!el || typeof el.closest !== 'function') return null;   // 진짜 DOM 이 아닌 자리(시험 등)
+    try {
+      for (const leaf of this.canvasLeaves(null)) {
+        const cv = leaf.view && leaf.view.canvas;
+        const nodes = cv && cv.nodes;
+        if (!nodes || typeof nodes.values !== 'function') continue;
+        for (const node of nodes.values()) {
+          const ne = node && (node.nodeEl || node.containerEl || node.contentEl);
+          if (ne && typeof ne.contains === 'function' && ne.contains(el)) return { cv, node };
+        }
+      }
+    } catch (e) { console.error('[sync] canvasCardOf', e); }
+    return null;
+  }
+  // 누른 카드 «바로 아래»(x 그대로, y + 높이 + 20). 거기 이미 카드가 있으면 겹치지 않을 때까지 내린다.
+  askFreeSpot(cv, node) {
+    const x = Number(node.x) || 0, w = Number(node.width) || 400, h = Number(node.height) || 100;
+    let y = (Number(node.y) || 0) + h + 20;
+    let rects = [];
+    try {
+      const d = typeof cv.getData === 'function' ? cv.getData() : null;
+      rects = ((d && d.nodes) || []).filter((n) => n && typeof n.x === 'number' && typeof n.y === 'number');
+    } catch (e) { console.error('[sync] askFreeSpot', e); }
+    // 겹치면 그 카드 아래로 내린다. 늘 «아래»로만 가므로 멈춘다(맞물린 판을 대비해 횟수도 막아 둔다).
+    for (let i = 0; i < 200; i++) {
+      const hit = rects.find((n) => x < n.x + (n.width || 0) && n.x < x + w && y < n.y + (n.height || 0) && n.y < y + h);
+      if (!hit) break;
+      y = hit.y + (hit.height || 0) + 20;
+    }
+    return { x, y, width: w, height: h };
+  }
+  async askAddCard(el, fields) {
+    const found = this.canvasCardOf(el);
+    if (!found) return '⛔ 이 카드가 놓인 판을 못 찾았습니다';
+    const { cv, node } = found;
+    const spot = this.askFreeSpot(cv, node);
+    const text = this.askNewCardText(fields);
+    let made = null;
+    try {
+      if (typeof cv.createTextNode === 'function') {
+        // ⭐ 옵시디언 «카드 추가»가 쓰는 그 길이다 — 그래서 실행취소(Ctrl+Z)도 손으로 만든 카드와 같이 먹는다.
+        //    판마다 인자 모양이 조금씩 달라서, 만든 뒤 자리·크기를 한 번 더 못박는다.
+        made = cv.createTextNode({ pos: { x: spot.x, y: spot.y }, size: { width: spot.width, height: spot.height },
+                                   text, focus: false, save: true });
+        if (made && typeof made.moveAndResize === 'function') made.moveAndResize(spot);
+      }
+    } catch (e) { console.error('[sync] askAddCard(createTextNode)', e); made = null; }
+    if (made) {
+      // 고른 상태로 둔다 — 형이 곧바로 적을 수 있게. 편집까지 열리면 더 좋다(없는 판도 있어 감싼다).
+      try { if (typeof cv.selectOnly === 'function') cv.selectOnly(made); } catch (e) {}
+      try { if (typeof made.startEditing === 'function') made.startEditing(); } catch (e) {}
+      try { if (typeof cv.requestSave === 'function') cv.requestSave(); } catch (e) {}
+      return '✅ 빈 물음 카드를 놓았습니다';
+    }
+    // 물러설 자리 — 판 데이터에 직접 넣고 화면을 갈아 끼운다. 이 길은 Ctrl+Z 가 안 먹는다(그래서 그리 적는다).
+    try {
+      const d = cv.getData();
+      d.nodes.push({ id: this.canvasCardId(), type: 'text', text,
+                     x: spot.x, y: spot.y, width: spot.width, height: spot.height });
+      cv.setData(d);
+      if (typeof cv.requestSave === 'function') cv.requestSave();
+      return '✅ 놓았습니다 (이건 Ctrl+Z 로 안 지워집니다)';
+    } catch (e) { console.error('[sync] askAddCard(setData)', e); return '⛔ 카드를 놓지 못했습니다'; }
   }
   async sendCanvasAsk({ board, kind, text, unit, channel }) {
     if (!this.configured()) return { ok: false, msg: '⛔ 로그인부터 하십시오' };

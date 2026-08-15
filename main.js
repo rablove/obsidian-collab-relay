@@ -10632,6 +10632,8 @@ body.collab-canvassync-open .modal-close-button { display: none !important; }
 .lpms-ask-run .lpms-ask-btn { background: var(--color-red, #d64545); border-color: var(--color-red, #d64545); }
 .lpms-ask-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .lpms-ask-ch { padding: 4px 8px; border-radius: 6px; font-size: 13px; }
+.lpms-ask-add { background: transparent; color: var(--text-normal); border-color: var(--background-modifier-border); }
+.lpms-ask-add:hover:not(:disabled) { background: var(--background-modifier-hover); }
 .lpms-ask-note { font-size: 12px; color: var(--text-muted); }
 `;
 var VaultSyncCollab = class extends import_obsidian.Plugin {
@@ -10978,6 +10980,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       o.value = v;
     }
     sel.value = this.askChannelSeed(fields, el, ctx);
+    const add = kind === "ask" && /\.canvas$/i.test(ctx && ctx.sourcePath || "") ? row.createEl("button", { cls: "lpms-ask-btn lpms-ask-add", text: "+ \uBB3C\uC74C" }) : null;
     const note = box.createDiv({ cls: "lpms-ask-note", text: "" });
     btn.onclick = async () => {
       if (btn.disabled) return;
@@ -11000,6 +11003,144 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         }
       }, 1e4);
     };
+    if (add) add.onclick = async () => {
+      if (add.disabled) return;
+      add.disabled = true;
+      try {
+        note.setText(await this.askAddCard(el, fields));
+      } finally {
+        setTimeout(() => {
+          try {
+            add.disabled = false;
+          } catch (e) {
+          }
+        }, 400);
+      }
+    };
+  }
+  /* ── 「+ 물음」 — 빈 물음 카드를 한 장 더 놓는다 (형 지시 2026-08-15) ───────────────
+     ⭐ **이건 위 «캔버스 파일은 안 건드린다»와 안 어긋난다.** 그 규칙은 «서버가 형이 열어 둔 판을
+        되쓰면 어긋난다» 는 얘기다. 여기서는 서버가 안 낀다 — `reloadCanvas` 가 쓰는 그 손잡이
+        (`leaf.view.canvas`)로 **형이 직접** 놓는 것이라 카드를 손으로 끌어 놓는 것과 같은 길이다.
+     글은 **누른 카드의 블록 머리 설정만 물려받고 본문은 비운다.** 복제가 아니라 「같은 종류의 빈 카드
+     하나 더」다 — 글까지 베끼면 서버의 `find_question`(글로 카드를 되짚는다)이 둘을 못 가린다. */
+  // 새 카드에 적을 글. 머리 설정(`unit:`·`채널:`)만 물려받고 본문은 없다.
+  askNewCardText(fields) {
+    const L = ["```lpms-ask"];
+    if (fields && fields.unit) L.push("unit: " + fields.unit);
+    if (fields && fields["\uCC44\uB110"]) L.push("\uCC44\uB110: " + fields["\uCC44\uB110"]);
+    L.push("```");
+    return L.join("\n");
+  }
+  // 옵시디언이 카드에 붙이는 것과 같은 «무작위 16자리 hex».
+  //  ⛔ `unit-`·`alt-`·`doc-`·`ans-`·`q-`·`part-` 로 시작하면 안 된다 — 도구(`pipeline_canvas._MINE`)가
+  //     쓰는 자리라 겹치면 나중에 도구가 만든 카드와 id 가 부딪힌다. hex 에는 `-` 가 없어 안 겹친다.
+  canvasCardId() {
+    let s = "";
+    try {
+      const c = typeof crypto !== "undefined" && crypto && crypto.getRandomValues ? crypto : null;
+      if (c) {
+        const b = new Uint8Array(8);
+        c.getRandomValues(b);
+        for (const x of b) s += x.toString(16).padStart(2, "0");
+      }
+    } catch (e) {
+      s = "";
+    }
+    while (s.length < 16) s += Math.floor(Math.random() * 16).toString(16);
+    return s.slice(0, 16);
+  }
+  // 이 코드블록이 놓인 «캔버스 카드»를 찾는다 → { cv: 판 손잡이, node: 그 카드 }.
+  canvasCardOf(el) {
+    if (!el || typeof el.closest !== "function") return null;
+    try {
+      for (const leaf of this.canvasLeaves(null)) {
+        const cv = leaf.view && leaf.view.canvas;
+        const nodes = cv && cv.nodes;
+        if (!nodes || typeof nodes.values !== "function") continue;
+        for (const node of nodes.values()) {
+          const ne = node && (node.nodeEl || node.containerEl || node.contentEl);
+          if (ne && typeof ne.contains === "function" && ne.contains(el)) return { cv, node };
+        }
+      }
+    } catch (e) {
+      console.error("[sync] canvasCardOf", e);
+    }
+    return null;
+  }
+  // 누른 카드 «바로 아래»(x 그대로, y + 높이 + 20). 거기 이미 카드가 있으면 겹치지 않을 때까지 내린다.
+  askFreeSpot(cv, node) {
+    const x = Number(node.x) || 0, w = Number(node.width) || 400, h = Number(node.height) || 100;
+    let y = (Number(node.y) || 0) + h + 20;
+    let rects = [];
+    try {
+      const d = typeof cv.getData === "function" ? cv.getData() : null;
+      rects = (d && d.nodes || []).filter((n) => n && typeof n.x === "number" && typeof n.y === "number");
+    } catch (e) {
+      console.error("[sync] askFreeSpot", e);
+    }
+    for (let i = 0; i < 200; i++) {
+      const hit = rects.find((n) => x < n.x + (n.width || 0) && n.x < x + w && y < n.y + (n.height || 0) && n.y < y + h);
+      if (!hit) break;
+      y = hit.y + (hit.height || 0) + 20;
+    }
+    return { x, y, width: w, height: h };
+  }
+  async askAddCard(el, fields) {
+    const found = this.canvasCardOf(el);
+    if (!found) return "\u26D4 \uC774 \uCE74\uB4DC\uAC00 \uB193\uC778 \uD310\uC744 \uBABB \uCC3E\uC558\uC2B5\uB2C8\uB2E4";
+    const { cv, node } = found;
+    const spot = this.askFreeSpot(cv, node);
+    const text2 = this.askNewCardText(fields);
+    let made = null;
+    try {
+      if (typeof cv.createTextNode === "function") {
+        made = cv.createTextNode({
+          pos: { x: spot.x, y: spot.y },
+          size: { width: spot.width, height: spot.height },
+          text: text2,
+          focus: false,
+          save: true
+        });
+        if (made && typeof made.moveAndResize === "function") made.moveAndResize(spot);
+      }
+    } catch (e) {
+      console.error("[sync] askAddCard(createTextNode)", e);
+      made = null;
+    }
+    if (made) {
+      try {
+        if (typeof cv.selectOnly === "function") cv.selectOnly(made);
+      } catch (e) {
+      }
+      try {
+        if (typeof made.startEditing === "function") made.startEditing();
+      } catch (e) {
+      }
+      try {
+        if (typeof cv.requestSave === "function") cv.requestSave();
+      } catch (e) {
+      }
+      return "\u2705 \uBE48 \uBB3C\uC74C \uCE74\uB4DC\uB97C \uB193\uC558\uC2B5\uB2C8\uB2E4";
+    }
+    try {
+      const d = cv.getData();
+      d.nodes.push({
+        id: this.canvasCardId(),
+        type: "text",
+        text: text2,
+        x: spot.x,
+        y: spot.y,
+        width: spot.width,
+        height: spot.height
+      });
+      cv.setData(d);
+      if (typeof cv.requestSave === "function") cv.requestSave();
+      return "\u2705 \uB193\uC558\uC2B5\uB2C8\uB2E4 (\uC774\uAC74 Ctrl+Z \uB85C \uC548 \uC9C0\uC6CC\uC9D1\uB2C8\uB2E4)";
+    } catch (e) {
+      console.error("[sync] askAddCard(setData)", e);
+      return "\u26D4 \uCE74\uB4DC\uB97C \uB193\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4";
+    }
   }
   async sendCanvasAsk({ board, kind, text: text2, unit, channel }) {
     if (!this.configured()) return { ok: false, msg: "\u26D4 \uB85C\uADF8\uC778\uBD80\uD130 \uD558\uC2ED\uC2DC\uC624" };
