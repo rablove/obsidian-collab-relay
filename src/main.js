@@ -562,7 +562,12 @@ export default class VaultSyncCollab extends Plugin {
   }
   async sendCanvasAsk({ board, kind, text, unit, channel, kind2 }) {
     if (!this.configured()) return { ok: false, msg: '⛔ 로그인부터 하십시오' };
-    if (kind === 'ask' && !text) return { ok: false, msg: '⛔ 이 카드에 물음을 적고 누르십시오' };
+    // ⭐ `종류:` 가 붙은 카드(지금은 «새 실험»)는 글이 없어도 뜻이 선다 — `▶ 돌리기` 와 같다.
+    //    「판 하나 만들어 주세요」가 그 자체로 요청이라, 글을 안 적었다고 막으면 [생성]·복제로
+    //    나온 카드(제목을 안 베끼므로 글이 아예 없다)가 여기서 조용히 멈춘다.
+    //    서버 `canvas_watch.button_request` 도 `if not text and not newexp:` 로 같은 짝을 본다.
+    //    ⛔ `종류` 없는 빈 물음은 그대로 버린다 — 여기가 느슨해지면 빈 세션이 뜬다.
+    if (kind === 'ask' && !text && !kind2) return { ok: false, msg: '⛔ 이 카드에 물음을 적고 누르십시오' };
     const now = Date.now();
     this._askSent = (this._askSent || []).filter((t) => now - t < 3600000);
     if (this._askSent.length >= ASK_MAX_PER_HOUR) return { ok: false, msg: `⛔ 한 시간 상한(${ASK_MAX_PER_HOUR}건)에 걸렸습니다` };
