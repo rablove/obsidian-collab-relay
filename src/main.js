@@ -968,8 +968,17 @@ export default class VaultSyncCollab extends Plugin {
         return true;
       }
       if (local === base) { await this.writeLocal(p, R); this.shadow.set(p, R); return true; }  // 서버만 바뀜 → 서버로
-      // 기준선 대비 양쪽 다 바뀜 → 진짜 동시편집 충돌 → 사본 보관
       const st = await this.app.vault.adapter.stat(p); const lm = st ? st.mtime : 0;
+      // ⭐ 서버는 그대로, 로컬만 바뀜 → 올린다. **충돌이 아니다** (첨부 쪽 `base === dig` 와 같은 문).
+      //  2026-08-16 판 EXP-009 사고: 이 문이 없어서 «서버가 안 바뀌었는데» 충돌본이 났다. 진단
+      //  레코드가 `serverChanged:false · baseLen==serverLen` 로 그대로 말해 줬다. 위 문은 「서버만
+      //  바뀜」만 걸러내므로, 그 짝인 「로컬만 바뀜」은 아래 «양쪽 다 바뀜» 으로 흘러내렸다.
+      //  언제 오나 — changes 피드는 **내가 올린 문서도 되돌려 준다.** 그 사이에 내가 그 판을 더
+      //  만졌으면 local≠base 인 채로 R===base 인 문서가 도착한다. 흔한 일이고 충돌이 아니다.
+      //  .md 는 merge3(base, local, base) 가 local 을 그대로 내주어 안 드러났다 — 캔버스만 물렸다
+      //  (캔버스는 JSON 이라 병합을 안 한다).
+      if (R === base) { await this.putDoc(p, local, lm); this.shadow.set(p, local); return true; }
+      // 기준선 대비 양쪽 다 바뀜 → 진짜 동시편집 충돌 → 사본 보관
       const merged = this.canMerge(p) ? merge3(base, local, R) : null;   // 3-way 병합 — 겹치지 않으면 사본 없이 합침(양쪽 보존·수렴). 캔버스는 JSON 이라 안 합친다 → 아래 최신 승 + 사본
       if (merged !== null) {
         await this.writeLocal(p, merged); this.shadow.set(p, merged);

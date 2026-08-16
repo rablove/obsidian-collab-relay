@@ -11796,6 +11796,11 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       }
       const st = await this.app.vault.adapter.stat(p);
       const lm = st ? st.mtime : 0;
+      if (R === base) {
+        await this.putDoc(p, local, lm);
+        this.shadow.set(p, local);
+        return true;
+      }
       const merged = this.canMerge(p) ? merge3(base, local, R) : null;
       if (merged !== null) {
         await this.writeLocal(p, merged);
