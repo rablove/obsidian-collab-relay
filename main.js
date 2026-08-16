@@ -10645,6 +10645,10 @@ body.collab-canvassync-open .modal-close-button { display: none !important; }
 .lpms-ask-add { background: transparent; color: var(--text-normal); border-color: var(--background-modifier-border); }
 .lpms-ask-add:hover:not(:disabled) { background: var(--background-modifier-hover); }
 .lpms-ask-note { font-size: 12px; color: var(--text-muted); }
+/* \uCE94\uBC84\uC2A4 \uC544\uB798 \xAB\uCE74\uB4DC \uCD94\uAC00\xBB \uC904\uC5D0 \uC6B0\uB9AC\uAC00 \uB354\uD55C \uB2E8\uCD94. \uC790\uB9AC\xB7\uD06C\uAE30\uB294 \uC635\uC2DC\uB514\uC5B8 \uAC83(canvas-card-menu-button)\uC744
+   \uADF8\uB300\uB85C \uBB3C\uB824\uBC1B\uACE0, \uC544\uC774\uCF58\uC744 \uBABB \uADF8\uB838\uC744 \uB54C \uC4F0\uB294 \uAE00\uC790\uB9CC \uC5EC\uAE30\uC11C \uC190\uBCF8\uB2E4. */
+.lpms-cardmenu-btn { cursor: var(--cursor); }
+.lpms-cardmenu-btn.lpms-cardmenu-text { font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
 `;
 var VaultSyncCollab = class extends import_obsidian.Plugin {
   async onload() {
@@ -10720,7 +10724,12 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       this.registerInterval(window.setInterval(() => this.syncCycle(), 6e4));
       this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.onActiveChange()));
       this.registerEvent(this.app.workspace.on("file-open", () => this.onActiveChange()));
-      this.registerEvent(this.app.workspace.on("layout-change", () => this.canvasReconcile()));
+      this.registerEvent(this.app.workspace.on("layout-change", () => {
+        this.canvasReconcile();
+        this.askMenuSoon();
+      }));
+      this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.askMenuSoon()));
+      this.askMenuSoon();
       this.registerDomEvent(window, "offline", () => this.setNet(false));
       this.registerDomEvent(window, "online", () => this.setNet(true));
       this.registerInterval(window.setInterval(() => this.refreshLock(), 3e3));
@@ -10734,6 +10743,11 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   }
   onunload() {
     this._rtRunning = false;
+    this._dead = true;
+    try {
+      for (const b of Array.from(document.querySelectorAll(".lpms-cardmenu-btn"))) b.remove();
+    } catch (e) {
+    }
     try {
       this.applyViewLock(false);
     } catch (e) {
@@ -11107,13 +11121,17 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   // 누른 카드 «바로 아래»(x 그대로, y + 높이 + 20). 거기 이미 카드가 있으면 겹치지 않을 때까지 내린다.
   askFreeSpot(cv, node) {
     const x = Number(node.x) || 0, w = Number(node.width) || 400, h = Number(node.height) || 100;
-    let y = (Number(node.y) || 0) + h + 20;
-    let rects = [];
+    return this.askDodge(cv, { x, y: (Number(node.y) || 0) + h + 20, width: w, height: h });
+  }
+  // 놓으려는 자리가 다른 카드와 겹치면 안 겹칠 때까지 «아래»로 내린다.
+  askDodge(cv, rect) {
+    const { x, width: w, height: h } = rect;
+    let y = rect.y, rects = [];
     try {
       const d = typeof cv.getData === "function" ? cv.getData() : null;
       rects = (d && d.nodes || []).filter((n) => n && typeof n.x === "number" && typeof n.y === "number");
     } catch (e) {
-      console.error("[sync] askFreeSpot", e);
+      console.error("[sync] askDodge", e);
     }
     for (let i = 0; i < 200; i++) {
       const hit = rects.find((n) => x < n.x + (n.width || 0) && n.x < x + w && y < n.y + (n.height || 0) && n.y < y + h);
@@ -11126,9 +11144,15 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     const found = this.canvasCardOf(el);
     if (!found) return "\u26D4 \uC774 \uCE74\uB4DC\uAC00 \uB193\uC778 \uD310\uC744 \uBABB \uCC3E\uC558\uC2B5\uB2C8\uB2E4";
     const { cv, node } = found;
-    const spot = this.askFreeSpot(cv, node);
-    const text2 = this.askNewCardText(fields, kind);
-    const color = fields && fields["\uC885\uB958"] ? ASK_NEW_COLOR : null;
+    return await this.askPlaceCard(
+      cv,
+      this.askFreeSpot(cv, node),
+      this.askNewCardText(fields, kind),
+      fields && fields["\uC885\uB958"] ? ASK_NEW_COLOR : null
+    );
+  }
+  // 판에 카드 한 장을 실제로 놓는다. [생성] 단추와 아래 «카드 메뉴» 단추가 같이 쓴다.
+  async askPlaceCard(cv, spot, text2, color) {
     let made = null;
     try {
       if (typeof cv.createTextNode === "function") {
@@ -11186,6 +11210,115 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     } catch (e) {
       console.error("[sync] askAddCard(setData)", e);
       return "\u26D4 \uCE74\uB4DC\uB97C \uB193\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4";
+    }
+  }
+  /* ⭐ 캔버스 아래 «카드 추가» 줄에 우리 단추를 하나 더 놓는다 (형 지시 2026-08-16 —
+        「캔버스 UI 하단에 버튼 세 개 있는데 여기에도 우리 카드 만드는 버튼 못 넣냐」).
+     카드 «안»의 [생성] 은 **이미 있는 카드 옆에** 한 장 더 놓는 것이라, 판에 첫 물음 카드를
+     놓을 길이 없었다. 이 단추는 그 첫 장을 놓는다.
+     ⚠️ 옵시디언이 그 줄에 붙이는 class 는 **공개 API 가 아니다.** 이름이 바뀌면 못 찾는데,
+        그때는 **아무 일도 안 일어날 뿐**이다(단추가 안 보인다) — 판이 깨지지 않는다.
+        그래서 이름을 하나로 못박지 않고 아래처럼 차례로 찾는다. */
+  askCardMenuEl(host) {
+    if (!host || typeof host.querySelector !== "function") return null;
+    try {
+      const direct = host.querySelector(".canvas-card-menu") || host.querySelector('[class*="card-menu"]:not([class*="button"])');
+      if (direct) return direct;
+      const btn = host.querySelector('[class*="card-menu-button"]');
+      return btn && btn.parentElement || null;
+    } catch (e) {
+      console.error("[sync] askCardMenuEl", e);
+      return null;
+    }
+  }
+  // 화면 가운데에 놓는다. 못 물으면 판 «맨 아래» 밑으로 — 적어도 다른 카드를 안 덮는다.
+  askMenuSpot(cv) {
+    const w = 400, h = 200;
+    let c = null;
+    try {
+      if (typeof cv.posCenter === "function") c = cv.posCenter();
+    } catch (e) {
+    }
+    if (!c || typeof c.x !== "number" || typeof c.y !== "number") {
+      try {
+        const d = typeof cv.getData === "function" ? cv.getData() : null;
+        const ns = (d && d.nodes || []).filter((n) => n && typeof n.x === "number" && typeof n.y === "number");
+        const left = ns.length ? Math.min(...ns.map((n) => n.x)) : 0;
+        const bottom = ns.length ? Math.max(...ns.map((n) => n.y + (n.height || 0))) : 0;
+        c = { x: left + w / 2, y: bottom + 20 + h / 2 };
+      } catch (e) {
+        c = { x: 0, y: 0 };
+      }
+    }
+    return this.askDodge(cv, { x: Math.round(c.x - w / 2), y: Math.round(c.y - h / 2), width: w, height: h });
+  }
+  // 누르면 뜨는 것 — 무엇을 놓을지 고른다. 종류가 늘면 여기 한 줄만 는다.
+  askMenuKinds() {
+    return [
+      { label: "\uBB3C\uC74C", kind: "ask", kind2: null },
+      { label: "\uC0C8 \uC2E4\uD5D8", kind: "ask", kind2: "\uC0C8\uC2E4\uD5D8" },
+      { label: "\uB3CC\uB9AC\uAE30", kind: "run", kind2: null }
+    ];
+  }
+  async askMenuPlace(cv, item) {
+    const fields = item.kind2 ? { "\uC885\uB958": item.kind2 } : {};
+    return await this.askPlaceCard(
+      cv,
+      this.askMenuSpot(cv),
+      this.askNewCardText(fields, item.kind),
+      item.kind2 ? ASK_NEW_COLOR : null
+    );
+  }
+  askMenuMount() {
+    if (this._dead) return 0;
+    let n = 0;
+    for (const leaf of this.canvasLeaves(null)) {
+      try {
+        const host = leaf.view && leaf.view.containerEl;
+        const cv = leaf.view && leaf.view.canvas;
+        if (!host || !cv) continue;
+        const row = this.askCardMenuEl(host);
+        if (!row || typeof row.querySelector !== "function") continue;
+        if (row.querySelector(".lpms-cardmenu-btn")) continue;
+        const b = row.createDiv({ cls: "canvas-card-menu-button lpms-cardmenu-btn" });
+        try {
+          b.setAttribute("aria-label", "LPMS \uCE74\uB4DC \uB193\uAE30");
+        } catch (e) {
+        }
+        try {
+          (0, import_obsidian.setIcon)(b, "help-circle");
+        } catch (e) {
+        }
+        if (!b.querySelector("svg")) {
+          b.addClass("lpms-cardmenu-text");
+          b.setText("\uBB3C\uC74C");
+        }
+        b.onclick = (ev) => this.askMenuOpen(ev, cv);
+        n++;
+      } catch (e) {
+        console.error("[sync] askMenuMount", e);
+      }
+    }
+    return n;
+  }
+  // 판이 그려지는 데 시간이 걸린다 — 한 번만 부르면 놓친다. 몇 번 더 두드린다.
+  askMenuSoon() {
+    for (const d of [0, 300, 1200]) {
+      try {
+        window.setTimeout(() => this.askMenuMount(), d);
+      } catch (e) {
+      }
+    }
+  }
+  askMenuOpen(ev, cv) {
+    const items = this.askMenuKinds();
+    try {
+      const m = new import_obsidian.Menu();
+      for (const it of items) m.addItem((i) => i.setTitle(it.label).onClick(() => this.askMenuPlace(cv, it)));
+      m.showAtMouseEvent(ev);
+    } catch (e) {
+      console.error("[sync] askMenuOpen", e);
+      this.askMenuPlace(cv, items[0]);
     }
   }
   async sendCanvasAsk({ board, kind, text: text2, unit, channel, kind2 }) {

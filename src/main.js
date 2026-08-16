@@ -1,4 +1,4 @@
-import { Plugin, MarkdownView, Notice, PluginSettingTab, Setting, Modal, requestUrl, Platform } from 'obsidian';
+import { Plugin, MarkdownView, Notice, PluginSettingTab, Setting, Modal, requestUrl, Platform, Menu, setIcon } from 'obsidian';
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { yCollab } from 'y-codemirror.next';
@@ -162,6 +162,10 @@ body.collab-canvassync-open .modal-close-button { display: none !important; }
 .lpms-ask-add { background: transparent; color: var(--text-normal); border-color: var(--background-modifier-border); }
 .lpms-ask-add:hover:not(:disabled) { background: var(--background-modifier-hover); }
 .lpms-ask-note { font-size: 12px; color: var(--text-muted); }
+/* 캔버스 아래 «카드 추가» 줄에 우리가 더한 단추. 자리·크기는 옵시디언 것(canvas-card-menu-button)을
+   그대로 물려받고, 아이콘을 못 그렸을 때 쓰는 글자만 여기서 손본다. */
+.lpms-cardmenu-btn { cursor: var(--cursor); }
+.lpms-cardmenu-btn.lpms-cardmenu-text { font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
 `;
 
 export default class VaultSyncCollab extends Plugin {
@@ -216,7 +220,9 @@ export default class VaultSyncCollab extends Plugin {
       this.registerEvent(this.app.workspace.on('active-leaf-change', () => this.onActiveChange()));
       this.registerEvent(this.app.workspace.on('file-open', () => this.onActiveChange()));
       // 열려 있어 미뤄 둔 캔버스가 닫히는 것을 본다 (탭을 닫으면 layout-change 가 온다). 미룬 게 없으면 즉시 빠진다.
-      this.registerEvent(this.app.workspace.on('layout-change', () => this.canvasReconcile()));
+      this.registerEvent(this.app.workspace.on('layout-change', () => { this.canvasReconcile(); this.askMenuSoon(); }));
+      this.registerEvent(this.app.workspace.on('active-leaf-change', () => this.askMenuSoon()));
+      this.askMenuSoon();   // 이미 열려 있는 판에도 붙인다(플러그인을 켤 때·업데이트 직후)
       // 네트워크 끊김/복구를 즉시 감지 → 편집잠금 갱신 + 복구 시 바로 서버 변경분 당겨받기
       this.registerDomEvent(window, 'offline', () => this.setNet(false));
       this.registerDomEvent(window, 'online', () => this.setNet(true));
@@ -233,7 +239,8 @@ export default class VaultSyncCollab extends Plugin {
       this.onActiveChange(); this.ensurePresence(); this.fetchMod();
     });
   }
-  onunload() { this._rtRunning = false; try { this.applyViewLock(false); } catch (e) {} try { if (this._discModal) { this._discModal._auto = true; this._discModal.close(); } } catch (e) {} try { if (this._collabStyle) this._collabStyle.remove(); } catch (e) {} this.endSession(); this.stopPresence(); }
+  onunload() { this._rtRunning = false; this._dead = true;
+    try { for (const b of Array.from(document.querySelectorAll('.lpms-cardmenu-btn'))) b.remove(); } catch (e) {} try { this.applyViewLock(false); } catch (e) {} try { if (this._discModal) { this._discModal._auto = true; this._discModal.close(); } } catch (e) {} try { if (this._collabStyle) this._collabStyle.remove(); } catch (e) {} this.endSession(); this.stopPresence(); }
 
   setSync(s) { if (this.syncEl) this.syncEl.setText('⇄ ' + s); }
   setCollab(s) { if (this.collabEl) this.collabEl.setText('👥 ' + s); }
@@ -528,12 +535,16 @@ export default class VaultSyncCollab extends Plugin {
   // 누른 카드 «바로 아래»(x 그대로, y + 높이 + 20). 거기 이미 카드가 있으면 겹치지 않을 때까지 내린다.
   askFreeSpot(cv, node) {
     const x = Number(node.x) || 0, w = Number(node.width) || 400, h = Number(node.height) || 100;
-    let y = (Number(node.y) || 0) + h + 20;
-    let rects = [];
+    return this.askDodge(cv, { x, y: (Number(node.y) || 0) + h + 20, width: w, height: h });
+  }
+  // 놓으려는 자리가 다른 카드와 겹치면 안 겹칠 때까지 «아래»로 내린다.
+  askDodge(cv, rect) {
+    const { x, width: w, height: h } = rect;
+    let y = rect.y, rects = [];
     try {
       const d = typeof cv.getData === 'function' ? cv.getData() : null;
       rects = ((d && d.nodes) || []).filter((n) => n && typeof n.x === 'number' && typeof n.y === 'number');
-    } catch (e) { console.error('[sync] askFreeSpot', e); }
+    } catch (e) { console.error('[sync] askDodge', e); }
     // 겹치면 그 카드 아래로 내린다. 늘 «아래»로만 가므로 멈춘다(맞물린 판을 대비해 횟수도 막아 둔다).
     for (let i = 0; i < 200; i++) {
       const hit = rects.find((n) => x < n.x + (n.width || 0) && n.x < x + w && y < n.y + (n.height || 0) && n.y < y + h);
@@ -546,10 +557,12 @@ export default class VaultSyncCollab extends Plugin {
     const found = this.canvasCardOf(el);
     if (!found) return '⛔ 이 카드가 놓인 판을 못 찾았습니다';
     const { cv, node } = found;
-    const spot = this.askFreeSpot(cv, node);
-    const text = this.askNewCardText(fields, kind);
     // `종류:` 가 있는 카드(지금은 «새 실험» 뿐)는 초록으로 — 흰 카드로 나면 판에서 안 갈린다.
-    const color = fields && fields['종류'] ? ASK_NEW_COLOR : null;
+    return await this.askPlaceCard(cv, this.askFreeSpot(cv, node), this.askNewCardText(fields, kind),
+                                   fields && fields['종류'] ? ASK_NEW_COLOR : null);
+  }
+  // 판에 카드 한 장을 실제로 놓는다. [생성] 단추와 아래 «카드 메뉴» 단추가 같이 쓴다.
+  async askPlaceCard(cv, spot, text, color) {
     let made = null;
     try {
       if (typeof cv.createTextNode === 'function') {
@@ -583,6 +596,86 @@ export default class VaultSyncCollab extends Plugin {
       if (typeof cv.requestSave === 'function') cv.requestSave();
       return '✅ 놓았습니다 (이건 Ctrl+Z 로 안 지워집니다)';
     } catch (e) { console.error('[sync] askAddCard(setData)', e); return '⛔ 카드를 놓지 못했습니다'; }
+  }
+  /* ⭐ 캔버스 아래 «카드 추가» 줄에 우리 단추를 하나 더 놓는다 (형 지시 2026-08-16 —
+        「캔버스 UI 하단에 버튼 세 개 있는데 여기에도 우리 카드 만드는 버튼 못 넣냐」).
+     카드 «안»의 [생성] 은 **이미 있는 카드 옆에** 한 장 더 놓는 것이라, 판에 첫 물음 카드를
+     놓을 길이 없었다. 이 단추는 그 첫 장을 놓는다.
+     ⚠️ 옵시디언이 그 줄에 붙이는 class 는 **공개 API 가 아니다.** 이름이 바뀌면 못 찾는데,
+        그때는 **아무 일도 안 일어날 뿐**이다(단추가 안 보인다) — 판이 깨지지 않는다.
+        그래서 이름을 하나로 못박지 않고 아래처럼 차례로 찾는다. */
+  askCardMenuEl(host) {
+    if (!host || typeof host.querySelector !== 'function') return null;
+    try {
+      // ① 지금 이름  ② 이름이 조금 달라졌을 때  ③ 단추만 찾고 그 «부모»를 줄로 삼는다
+      const direct = host.querySelector('.canvas-card-menu') || host.querySelector('[class*="card-menu"]:not([class*="button"])');
+      if (direct) return direct;
+      const btn = host.querySelector('[class*="card-menu-button"]');
+      return (btn && btn.parentElement) || null;
+    } catch (e) { console.error('[sync] askCardMenuEl', e); return null; }
+  }
+  // 화면 가운데에 놓는다. 못 물으면 판 «맨 아래» 밑으로 — 적어도 다른 카드를 안 덮는다.
+  askMenuSpot(cv) {
+    const w = 400, h = 200;
+    let c = null;
+    try { if (typeof cv.posCenter === 'function') c = cv.posCenter(); } catch (e) {}
+    if (!c || typeof c.x !== 'number' || typeof c.y !== 'number') {
+      try {
+        const d = typeof cv.getData === 'function' ? cv.getData() : null;
+        const ns = ((d && d.nodes) || []).filter((n) => n && typeof n.x === 'number' && typeof n.y === 'number');
+        const left = ns.length ? Math.min(...ns.map((n) => n.x)) : 0;
+        const bottom = ns.length ? Math.max(...ns.map((n) => n.y + (n.height || 0))) : 0;
+        c = { x: left + w / 2, y: bottom + 20 + h / 2 };
+      } catch (e) { c = { x: 0, y: 0 }; }
+    }
+    return this.askDodge(cv, { x: Math.round(c.x - w / 2), y: Math.round(c.y - h / 2), width: w, height: h });
+  }
+  // 누르면 뜨는 것 — 무엇을 놓을지 고른다. 종류가 늘면 여기 한 줄만 는다.
+  askMenuKinds() {
+    return [{ label: '물음', kind: 'ask', kind2: null },
+            { label: '새 실험', kind: 'ask', kind2: '새실험' },
+            { label: '돌리기', kind: 'run', kind2: null }];
+  }
+  async askMenuPlace(cv, item) {
+    const fields = item.kind2 ? { '종류': item.kind2 } : {};
+    return await this.askPlaceCard(cv, this.askMenuSpot(cv), this.askNewCardText(fields, item.kind),
+                                   item.kind2 ? ASK_NEW_COLOR : null);
+  }
+  askMenuMount() {
+    if (this._dead) return 0;
+    let n = 0;
+    for (const leaf of this.canvasLeaves(null)) {
+      try {
+        const host = leaf.view && leaf.view.containerEl;
+        const cv = leaf.view && leaf.view.canvas;
+        if (!host || !cv) continue;
+        const row = this.askCardMenuEl(host);
+        if (!row || typeof row.querySelector !== 'function') continue;
+        if (row.querySelector('.lpms-cardmenu-btn')) continue;   // 이미 붙였다
+        const b = row.createDiv({ cls: 'canvas-card-menu-button lpms-cardmenu-btn' });
+        try { b.setAttribute('aria-label', 'LPMS 카드 놓기'); } catch (e) {}
+        // 아이콘 이름도 옵시디언 것이라 없을 수 있다 → 못 그렸으면 글자로 대신한다(빈 단추를 안 남긴다).
+        try { setIcon(b, 'help-circle'); } catch (e) {}
+        if (!b.querySelector('svg')) { b.addClass('lpms-cardmenu-text'); b.setText('물음'); }
+        b.onclick = (ev) => this.askMenuOpen(ev, cv);
+        n++;
+      } catch (e) { console.error('[sync] askMenuMount', e); }
+    }
+    return n;
+  }
+  // 판이 그려지는 데 시간이 걸린다 — 한 번만 부르면 놓친다. 몇 번 더 두드린다.
+  askMenuSoon() { for (const d of [0, 300, 1200]) { try { window.setTimeout(() => this.askMenuMount(), d); } catch (e) {} } }
+  askMenuOpen(ev, cv) {
+    const items = this.askMenuKinds();
+    try {
+      const m = new Menu();
+      for (const it of items) m.addItem((i) => i.setTitle(it.label).onClick(() => this.askMenuPlace(cv, it)));
+      m.showAtMouseEvent(ev);
+    } catch (e) {
+      // 메뉴를 못 띄우는 자리면 «물음» 을 그냥 놓는다 — 눌렀는데 아무 일도 안 나는 것보다 낫다.
+      console.error('[sync] askMenuOpen', e);
+      this.askMenuPlace(cv, items[0]);
+    }
   }
   async sendCanvasAsk({ board, kind, text, unit, channel, kind2 }) {
     if (!this.configured()) return { ok: false, msg: '⛔ 로그인부터 하십시오' };
