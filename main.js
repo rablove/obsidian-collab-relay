@@ -10642,13 +10642,12 @@ body.collab-canvassync-open .modal-close-button { display: none !important; }
 .lpms-ask-run .lpms-ask-btn { background: var(--color-red, #d64545); border-color: var(--color-red, #d64545); }
 .lpms-ask-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .lpms-ask-ch { padding: 4px 8px; border-radius: 6px; font-size: 13px; }
-.lpms-ask-add { background: transparent; color: var(--text-normal); border-color: var(--background-modifier-border); }
-.lpms-ask-add:hover:not(:disabled) { background: var(--background-modifier-hover); }
 .lpms-ask-note { font-size: 12px; color: var(--text-muted); }
 /* \uCE94\uBC84\uC2A4 \uC544\uB798 \xAB\uCE74\uB4DC \uCD94\uAC00\xBB \uC904\uC5D0 \uC6B0\uB9AC\uAC00 \uB354\uD55C \uB2E8\uCD94. \uC790\uB9AC\xB7\uD06C\uAE30\uB294 \uC635\uC2DC\uB514\uC5B8 \uAC83(canvas-card-menu-button)\uC744
    \uADF8\uB300\uB85C \uBB3C\uB824\uBC1B\uACE0, \uC544\uC774\uCF58\uC744 \uBABB \uADF8\uB838\uC744 \uB54C \uC4F0\uB294 \uAE00\uC790\uB9CC \uC5EC\uAE30\uC11C \uC190\uBCF8\uB2E4. */
 .lpms-cardmenu-btn { cursor: var(--cursor); }
-.lpms-cardmenu-btn.lpms-cardmenu-text { font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
+.lpms-cardmenu-btn.lpms-cardmenu-text { font-size: 12px; font-weight: 600; display: flex; align-items: center;
+  justify-content: center; width: auto; padding: 0 8px; white-space: nowrap; }
 `;
 var VaultSyncCollab = class extends import_obsidian.Plugin {
   async onload() {
@@ -10992,25 +10991,6 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     const v = seed ? seed["\uCC44\uB110"] : void 0;
     return (v === void 0 ? null : ASK_CHANNELS[String(v).trim().toLowerCase()]) || "\uC5EC\uAE30";
   }
-  // 「생성」 단추를 그릴 자리인가.
-  //  ⭐ **캔버스임을 증명하지 못해도 그린다 — 노트(.md)인 것이 확실할 때만 뺀다.** (0.5.54)
-  //     전에는 `ctx.sourcePath` 가 `.canvas` 일 때«만» 그렸는데, 캔버스 카드에서는 그 값이
-  //     `.canvas` 로 안 온다 → 0.5.50~0.5.53 넉 판 동안 실기기에서 단추가 한 번도 안 나왔다.
-  //     이 파일은 이미 두 군데서 «캔버스에선 ctx 를 못 믿는다» 고 말하고 있다
-  //     (보내기의 `board` 물러섬 · `askCardText` ②의 DOM 되짚기). 여기만 하드 게이트였다.
-  //  ⛔ 그래서 어긋나는 방향을 뒤집는다 — 이제 잘못돼야 «노트에 쓸데없는 단추가 하나 보인다» 이고,
-  //     눌러도 `askAddCard` 가 판을 못 찾아 ⛔ 로 답하고 끝난다. 전에는 잘못되면 **캔버스에서
-  //     아예 못 썼다.**
-  askShowAdd(el, ctx) {
-    try {
-      if (el && typeof el.closest === "function" && el.closest(".canvas-node-content")) return true;
-    } catch (e) {
-      console.error("[sync] askShowAdd", e);
-    }
-    const p = ctx && ctx.sourcePath || "";
-    if (/\.canvas$/i.test(p)) return true;
-    return !/\.md$/i.test(p);
-  }
   renderAskBlock(src, el, ctx, kind) {
     const { fields, rest } = this.askHeadFields(src);
     const seed = this.askSeedFields(fields, el, ctx);
@@ -11026,7 +11006,6 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       o.value = v;
     }
     sel.value = this.askChannelSeed(seed);
-    const add = kind === "ask" && this.askShowAdd(el, ctx) ? row.createEl("button", { cls: "lpms-ask-btn lpms-ask-add", text: "\uC0DD\uC131" }) : null;
     const note = box.createDiv({ cls: "lpms-ask-note", text: "" });
     btn.onclick = async () => {
       if (btn.disabled) return;
@@ -11049,31 +11028,20 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         }
       }, 1e4);
     };
-    if (add) add.onclick = async () => {
-      if (add.disabled) return;
-      add.disabled = true;
-      try {
-        note.setText(await this.askAddCard(el, seed, kind));
-      } finally {
-        setTimeout(() => {
-          try {
-            add.disabled = false;
-          } catch (e) {
-          }
-        }, 400);
-      }
-    };
   }
-  /* ── 「생성」 — 같은 종류의 빈 카드를 한 장 더 놓는다 (형 지시 2026-08-15) ─────────
+  /* ── 판에 빈 카드 한 장을 놓는다 — 판 아래 «카드 추가» 줄의 단추 셋이 쓰는 길 ─────────
      ⭐ **이건 위 «캔버스 파일은 안 건드린다»와 안 어긋난다.** 그 규칙은 «서버가 형이 열어 둔 판을
         되쓰면 어긋난다» 는 얘기다. 여기서는 서버가 안 낀다 — `reloadCanvas` 가 쓰는 그 손잡이
         (`leaf.view.canvas`)로 **형이 직접** 놓는 것이라 카드를 손으로 끌어 놓는 것과 같은 길이다.
-     글은 **누른 카드의 블록 머리 설정만 물려받고 본문은 비운다.** 복제가 아니라 「같은 종류의 빈 카드
-     하나 더」다 — 글까지 베끼면 서버의 `find_question`(글로 카드를 되짚는다)이 둘을 못 가린다. */
+     글은 **머리 설정만 있고 본문은 빈다** — 글까지 채우면 서버의 `find_question`(글로 카드를
+     되짚는다)이 여러 장을 못 가린다.
+     ⛔ 카드 «안»에 있던 [생성] 단추는 뺐다 (형 지시 2026-08-16 — 「지금 UI가 잘 되니까
+        굳이 카드 내에 생성 버튼 안 만들어도 될 듯」). 판 아래 줄의 단추 셋이 같은 일을 하고,
+        그쪽은 **첫 장**도 놓을 수 있다. */
   // 새 카드에 적을 글. 머리 설정(`unit:`·`채널:`)만 물려받고 본문은 없다.
   //  ⛔ 카드 제목(`# ▶ 돌리기` 같은 것)도 안 베낀다 — 본문을 비우는 것과 같은 까닭이다.
-  //  ⭐ `종류:` 도 물려준다 — 이게 있어야 [생성] 이 «새 실험 카드 한 장 더» 가 된다.
-  //     안 물려주면 새 카드는 그냥 빈 물음이라, 눌렀을 때 「판을 만들어 달라」가 물음으로 도착한다.
+  //  ⭐ `종류:` 도 함께 적는다 — 이게 있어야 「새 실험」 단추가 낸 카드가 새 실험으로 읽힌다.
+  //     안 적으면 그냥 빈 물음이라, 눌렀을 때 「판을 만들어 달라」가 물음으로 도착한다.
   askNewCardText(fields, kind) {
     const L = ["```lpms-" + (kind === "run" ? "run" : "ask")];
     if (fields && fields.unit) L.push("unit: " + fields.unit);
@@ -11100,29 +11068,6 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     while (s.length < 16) s += Math.floor(Math.random() * 16).toString(16);
     return s.slice(0, 16);
   }
-  // 이 코드블록이 놓인 «캔버스 카드»를 찾는다 → { cv: 판 손잡이, node: 그 카드 }.
-  canvasCardOf(el) {
-    if (!el || typeof el.closest !== "function") return null;
-    try {
-      for (const leaf of this.canvasLeaves(null)) {
-        const cv = leaf.view && leaf.view.canvas;
-        const nodes = cv && cv.nodes;
-        if (!nodes || typeof nodes.values !== "function") continue;
-        for (const node of nodes.values()) {
-          const ne = node && (node.nodeEl || node.containerEl || node.contentEl);
-          if (ne && typeof ne.contains === "function" && ne.contains(el)) return { cv, node };
-        }
-      }
-    } catch (e) {
-      console.error("[sync] canvasCardOf", e);
-    }
-    return null;
-  }
-  // 누른 카드 «바로 아래»(x 그대로, y + 높이 + 20). 거기 이미 카드가 있으면 겹치지 않을 때까지 내린다.
-  askFreeSpot(cv, node) {
-    const x = Number(node.x) || 0, w = Number(node.width) || 400, h = Number(node.height) || 100;
-    return this.askDodge(cv, { x, y: (Number(node.y) || 0) + h + 20, width: w, height: h });
-  }
   // 놓으려는 자리가 다른 카드와 겹치면 안 겹칠 때까지 «아래»로 내린다.
   askDodge(cv, rect) {
     const { x, width: w, height: h } = rect;
@@ -11140,18 +11085,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
     return { x, y, width: w, height: h };
   }
-  async askAddCard(el, fields, kind) {
-    const found = this.canvasCardOf(el);
-    if (!found) return "\u26D4 \uC774 \uCE74\uB4DC\uAC00 \uB193\uC778 \uD310\uC744 \uBABB \uCC3E\uC558\uC2B5\uB2C8\uB2E4";
-    const { cv, node } = found;
-    return await this.askPlaceCard(
-      cv,
-      this.askFreeSpot(cv, node),
-      this.askNewCardText(fields, kind),
-      fields && fields["\uC885\uB958"] ? ASK_NEW_COLOR : null
-    );
-  }
-  // 판에 카드 한 장을 실제로 놓는다. [생성] 단추와 아래 «카드 메뉴» 단추가 같이 쓴다.
+  // 판에 카드 한 장을 실제로 놓는다. 판 아래 «카드 추가» 줄의 단추 셋이 같이 쓴다.
   async askPlaceCard(cv, spot, text2, color) {
     let made = null;
     try {
@@ -11166,7 +11100,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         if (made && typeof made.moveAndResize === "function") made.moveAndResize(spot);
       }
     } catch (e) {
-      console.error("[sync] askAddCard(createTextNode)", e);
+      console.error("[sync] askPlaceCard(createTextNode)", e);
       made = null;
     }
     if (made) {
@@ -11208,14 +11142,14 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       if (typeof cv.requestSave === "function") cv.requestSave();
       return "\u2705 \uB193\uC558\uC2B5\uB2C8\uB2E4 (\uC774\uAC74 Ctrl+Z \uB85C \uC548 \uC9C0\uC6CC\uC9D1\uB2C8\uB2E4)";
     } catch (e) {
-      console.error("[sync] askAddCard(setData)", e);
+      console.error("[sync] askPlaceCard(setData)", e);
       return "\u26D4 \uCE74\uB4DC\uB97C \uB193\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4";
     }
   }
-  /* ⭐ 캔버스 아래 «카드 추가» 줄에 우리 단추를 하나 더 놓는다 (형 지시 2026-08-16 —
-        「캔버스 UI 하단에 버튼 세 개 있는데 여기에도 우리 카드 만드는 버튼 못 넣냐」).
-     카드 «안»의 [생성] 은 **이미 있는 카드 옆에** 한 장 더 놓는 것이라, 판에 첫 물음 카드를
-     놓을 길이 없었다. 이 단추는 그 첫 장을 놓는다.
+  /* ⭐ 캔버스 아래 «카드 추가» 줄에 우리 단추 **셋**을 놓는다 — 물음 · 새 실험 · 돌리기.
+     (형 지시 2026-08-16 — 「물음, 새 실험, 돌리기 이거 각각을 버튼 하나하나 대응시켜 달라」.)
+     전에는 단추 하나를 눌러 메뉴에서 골랐다. 손이 두 번 갔고, 무엇을 놓을 수 있는지가 **누르기
+     전에는 안 보였다.** 이제 줄만 보면 셋이 다 보이고 한 번에 놓인다.
      ⚠️ 옵시디언이 그 줄에 붙이는 class 는 **공개 API 가 아니다.** 이름이 바뀌면 못 찾는데,
         그때는 **아무 일도 안 일어날 뿐**이다(단추가 안 보인다) — 판이 깨지지 않는다.
         그래서 이름을 하나로 못박지 않고 아래처럼 차례로 찾는다. */
@@ -11252,12 +11186,14 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
     return this.askDodge(cv, { x: Math.round(c.x - w / 2), y: Math.round(c.y - h / 2), width: w, height: h });
   }
-  // 누르면 뜨는 것 — 무엇을 놓을지 고른다. 종류가 늘면 여기 한 줄만 는다.
+  // 줄에 놓을 단추들 — 왼쪽부터 이 차례로 그린다. 종류가 늘면 여기 한 줄만 는다.
+  //  `icon` 은 옵시디언(lucide) 아이콘 이름이다. 그 이름이 없는 판에서는 못 그리는데,
+  //  그때는 `label` 을 글자로 찍어 **빈 단추를 안 남긴다**(askMenuBtn).
   askMenuKinds() {
     return [
-      { label: "\uBB3C\uC74C", kind: "ask", kind2: null },
-      { label: "\uC0C8 \uC2E4\uD5D8", kind: "ask", kind2: "\uC0C8\uC2E4\uD5D8" },
-      { label: "\uB3CC\uB9AC\uAE30", kind: "run", kind2: null }
+      { label: "\uBB3C\uC74C", icon: "help-circle", kind: "ask", kind2: null },
+      { label: "\uC0C8 \uC2E4\uD5D8", icon: "flask-conical", kind: "ask", kind2: "\uC0C8\uC2E4\uD5D8" },
+      { label: "\uB3CC\uB9AC\uAE30", icon: "play", kind: "run", kind2: null }
     ];
   }
   async askMenuPlace(cv, item) {
@@ -11268,6 +11204,26 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       this.askNewCardText(fields, item.kind),
       item.kind2 ? ASK_NEW_COLOR : null
     );
+  }
+  // 단추 한 개를 줄에 그린다. 생김새(자리·크기)는 옵시디언 단추의 class 를 그대로 물려받는다.
+  askMenuBtn(row, cv, item) {
+    const b = row.createDiv({ cls: "canvas-card-menu-button lpms-cardmenu-btn" });
+    try {
+      b.setAttribute("aria-label", item.label);
+    } catch (e) {
+    }
+    try {
+      (0, import_obsidian.setIcon)(b, item.icon);
+    } catch (e) {
+    }
+    if (!b.querySelector("svg")) {
+      b.addClass("lpms-cardmenu-text");
+      b.setText(item.label);
+    }
+    b.onclick = () => {
+      this.askMenuPlace(cv, item);
+    };
+    return b;
   }
   askMenuMount() {
     if (this._dead) return 0;
@@ -11280,20 +11236,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         const row = this.askCardMenuEl(host);
         if (!row || typeof row.querySelector !== "function") continue;
         if (row.querySelector(".lpms-cardmenu-btn")) continue;
-        const b = row.createDiv({ cls: "canvas-card-menu-button lpms-cardmenu-btn" });
-        try {
-          b.setAttribute("aria-label", "LPMS \uCE74\uB4DC \uB193\uAE30");
-        } catch (e) {
-        }
-        try {
-          (0, import_obsidian.setIcon)(b, "help-circle");
-        } catch (e) {
-        }
-        if (!b.querySelector("svg")) {
-          b.addClass("lpms-cardmenu-text");
-          b.setText("\uBB3C\uC74C");
-        }
-        b.onclick = (ev) => this.askMenuOpen(ev, cv);
+        for (const item of this.askMenuKinds()) this.askMenuBtn(row, cv, item);
         n++;
       } catch (e) {
         console.error("[sync] askMenuMount", e);
@@ -11308,17 +11251,6 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         window.setTimeout(() => this.askMenuMount(), d);
       } catch (e) {
       }
-    }
-  }
-  askMenuOpen(ev, cv) {
-    const items = this.askMenuKinds();
-    try {
-      const m = new import_obsidian.Menu();
-      for (const it of items) m.addItem((i) => i.setTitle(it.label).onClick(() => this.askMenuPlace(cv, it)));
-      m.showAtMouseEvent(ev);
-    } catch (e) {
-      console.error("[sync] askMenuOpen", e);
-      this.askMenuPlace(cv, items[0]);
     }
   }
   async sendCanvasAsk({ board, kind, text: text2, unit, channel, kind2 }) {

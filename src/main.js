@@ -1,4 +1,4 @@
-import { Plugin, MarkdownView, Notice, PluginSettingTab, Setting, Modal, requestUrl, Platform, Menu, setIcon } from 'obsidian';
+import { Plugin, MarkdownView, Notice, PluginSettingTab, Setting, Modal, requestUrl, Platform, setIcon } from 'obsidian';
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { yCollab } from 'y-codemirror.next';
@@ -159,13 +159,12 @@ body.collab-canvassync-open .modal-close-button { display: none !important; }
 .lpms-ask-run .lpms-ask-btn { background: var(--color-red, #d64545); border-color: var(--color-red, #d64545); }
 .lpms-ask-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .lpms-ask-ch { padding: 4px 8px; border-radius: 6px; font-size: 13px; }
-.lpms-ask-add { background: transparent; color: var(--text-normal); border-color: var(--background-modifier-border); }
-.lpms-ask-add:hover:not(:disabled) { background: var(--background-modifier-hover); }
 .lpms-ask-note { font-size: 12px; color: var(--text-muted); }
 /* 캔버스 아래 «카드 추가» 줄에 우리가 더한 단추. 자리·크기는 옵시디언 것(canvas-card-menu-button)을
    그대로 물려받고, 아이콘을 못 그렸을 때 쓰는 글자만 여기서 손본다. */
 .lpms-cardmenu-btn { cursor: var(--cursor); }
-.lpms-cardmenu-btn.lpms-cardmenu-text { font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
+.lpms-cardmenu-btn.lpms-cardmenu-text { font-size: 12px; font-weight: 600; display: flex; align-items: center;
+  justify-content: center; width: auto; padding: 0 8px; white-space: nowrap; }
 `;
 
 export default class VaultSyncCollab extends Plugin {
@@ -415,22 +414,6 @@ export default class VaultSyncCollab extends Plugin {
     const v = seed ? seed['채널'] : undefined;
     return (v === undefined ? null : ASK_CHANNELS[String(v).trim().toLowerCase()]) || '여기';
   }
-  // 「생성」 단추를 그릴 자리인가.
-  //  ⭐ **캔버스임을 증명하지 못해도 그린다 — 노트(.md)인 것이 확실할 때만 뺀다.** (0.5.54)
-  //     전에는 `ctx.sourcePath` 가 `.canvas` 일 때«만» 그렸는데, 캔버스 카드에서는 그 값이
-  //     `.canvas` 로 안 온다 → 0.5.50~0.5.53 넉 판 동안 실기기에서 단추가 한 번도 안 나왔다.
-  //     이 파일은 이미 두 군데서 «캔버스에선 ctx 를 못 믿는다» 고 말하고 있다
-  //     (보내기의 `board` 물러섬 · `askCardText` ②의 DOM 되짚기). 여기만 하드 게이트였다.
-  //  ⛔ 그래서 어긋나는 방향을 뒤집는다 — 이제 잘못돼야 «노트에 쓸데없는 단추가 하나 보인다» 이고,
-  //     눌러도 `askAddCard` 가 판을 못 찾아 ⛔ 로 답하고 끝난다. 전에는 잘못되면 **캔버스에서
-  //     아예 못 썼다.**
-  askShowAdd(el, ctx) {
-    try { if (el && typeof el.closest === 'function' && el.closest('.canvas-node-content')) return true; }
-    catch (e) { console.error('[sync] askShowAdd', e); }
-    const p = (ctx && ctx.sourcePath) || '';
-    if (/\.canvas$/i.test(p)) return true;
-    return !/\.md$/i.test(p);   // 노트면 뺀다. 그 밖(빈 값·모르는 것)은 그린다.
-  }
   renderAskBlock(src, el, ctx, kind) {
     const { fields, rest } = this.askHeadFields(src);
     const seed = this.askSeedFields(fields, el, ctx);
@@ -448,17 +431,6 @@ export default class VaultSyncCollab extends Plugin {
       const o = sel.createEl('option', { text: t }); o.value = v;
     }
     sel.value = this.askChannelSeed(seed);
-    // 「생성」 — 누르면 **누른 블록과 같은 종류**의 빈 카드가 바로 아래에 하나 더 생긴다.
-    //  ⭐ 라벨은 하나다 (형 지시 2026-08-15 — 「그냥 생성으로 통일」).
-    //     카드마다 라벨이 다르면(「+ 물음」·「+ 돌리기」…) 판에 카드 종류가 늘 때마다 이름이 늘어난다.
-    //     무엇이 생기는지는 **누른 그 카드**가 이미 말하고 있다.
-    //  ⛔ 물음(```lpms-ask)에만 붙는다 — 돌리기에는 안 붙인다 (형 지시 2026-08-16 —
-    //     「돌리기 판에서는 굳이 생성 버튼 필요없다」). 물음 카드는 카드마다 하나씩 달아 여럿 두는 것이
-    //     쓰임이지만, 돌리기는 **판 전체를 그대로 돌리는 것**이라 판에 한 장이면 된다. 두 장을 눌러 봐야
-    //     같은 요청이 두 번 갈 뿐이다.
-    //  ⛔ 캔버스에서만 붙는다 — 노트(.md)에는 놓을 판이 없어 눌러도 할 일이 없다.
-    const add = (kind === 'ask' && this.askShowAdd(el, ctx))
-      ? row.createEl('button', { cls: 'lpms-ask-btn lpms-ask-add', text: '생성' }) : null;
     // 빈칸으로 둔다 — 누른 뒤 «올리는 중…»·«✅ 올렸습니다»·«⛔ …» 가 여기로 나온다(상태 표시줄).
     const note = box.createDiv({ cls: 'lpms-ask-note', text: '' });
     btn.onclick = async () => {
@@ -474,23 +446,20 @@ export default class VaultSyncCollab extends Plugin {
       // 다시 누를 수는 있게 하되 바로는 아니다 — 손이 두 번 가서 세션이 둘 뜨는 것을 막는다.
       setTimeout(() => { try { btn.disabled = false; btn.setText('다시 보내기'); } catch (e) {} }, 10000);
     };
-    if (add) add.onclick = async () => {
-      if (add.disabled) return;
-      add.disabled = true;
-      try { note.setText(await this.askAddCard(el, seed, kind)); }
-      finally { setTimeout(() => { try { add.disabled = false; } catch (e) {} }, 400); }
-    };
   }
-  /* ── 「생성」 — 같은 종류의 빈 카드를 한 장 더 놓는다 (형 지시 2026-08-15) ─────────
+  /* ── 판에 빈 카드 한 장을 놓는다 — 판 아래 «카드 추가» 줄의 단추 셋이 쓰는 길 ─────────
      ⭐ **이건 위 «캔버스 파일은 안 건드린다»와 안 어긋난다.** 그 규칙은 «서버가 형이 열어 둔 판을
         되쓰면 어긋난다» 는 얘기다. 여기서는 서버가 안 낀다 — `reloadCanvas` 가 쓰는 그 손잡이
         (`leaf.view.canvas`)로 **형이 직접** 놓는 것이라 카드를 손으로 끌어 놓는 것과 같은 길이다.
-     글은 **누른 카드의 블록 머리 설정만 물려받고 본문은 비운다.** 복제가 아니라 「같은 종류의 빈 카드
-     하나 더」다 — 글까지 베끼면 서버의 `find_question`(글로 카드를 되짚는다)이 둘을 못 가린다. */
+     글은 **머리 설정만 있고 본문은 빈다** — 글까지 채우면 서버의 `find_question`(글로 카드를
+     되짚는다)이 여러 장을 못 가린다.
+     ⛔ 카드 «안»에 있던 [생성] 단추는 뺐다 (형 지시 2026-08-16 — 「지금 UI가 잘 되니까
+        굳이 카드 내에 생성 버튼 안 만들어도 될 듯」). 판 아래 줄의 단추 셋이 같은 일을 하고,
+        그쪽은 **첫 장**도 놓을 수 있다. */
   // 새 카드에 적을 글. 머리 설정(`unit:`·`채널:`)만 물려받고 본문은 없다.
   //  ⛔ 카드 제목(`# ▶ 돌리기` 같은 것)도 안 베낀다 — 본문을 비우는 것과 같은 까닭이다.
-  //  ⭐ `종류:` 도 물려준다 — 이게 있어야 [생성] 이 «새 실험 카드 한 장 더» 가 된다.
-  //     안 물려주면 새 카드는 그냥 빈 물음이라, 눌렀을 때 「판을 만들어 달라」가 물음으로 도착한다.
+  //  ⭐ `종류:` 도 함께 적는다 — 이게 있어야 「새 실험」 단추가 낸 카드가 새 실험으로 읽힌다.
+  //     안 적으면 그냥 빈 물음이라, 눌렀을 때 「판을 만들어 달라」가 물음으로 도착한다.
   askNewCardText(fields, kind) {
     const L = ['```lpms-' + (kind === 'run' ? 'run' : 'ask')];
     if (fields && fields.unit) L.push('unit: ' + fields.unit);
@@ -516,27 +485,6 @@ export default class VaultSyncCollab extends Plugin {
     while (s.length < 16) s += Math.floor(Math.random() * 16).toString(16);
     return s.slice(0, 16);
   }
-  // 이 코드블록이 놓인 «캔버스 카드»를 찾는다 → { cv: 판 손잡이, node: 그 카드 }.
-  canvasCardOf(el) {
-    if (!el || typeof el.closest !== 'function') return null;   // 진짜 DOM 이 아닌 자리(시험 등)
-    try {
-      for (const leaf of this.canvasLeaves(null)) {
-        const cv = leaf.view && leaf.view.canvas;
-        const nodes = cv && cv.nodes;
-        if (!nodes || typeof nodes.values !== 'function') continue;
-        for (const node of nodes.values()) {
-          const ne = node && (node.nodeEl || node.containerEl || node.contentEl);
-          if (ne && typeof ne.contains === 'function' && ne.contains(el)) return { cv, node };
-        }
-      }
-    } catch (e) { console.error('[sync] canvasCardOf', e); }
-    return null;
-  }
-  // 누른 카드 «바로 아래»(x 그대로, y + 높이 + 20). 거기 이미 카드가 있으면 겹치지 않을 때까지 내린다.
-  askFreeSpot(cv, node) {
-    const x = Number(node.x) || 0, w = Number(node.width) || 400, h = Number(node.height) || 100;
-    return this.askDodge(cv, { x, y: (Number(node.y) || 0) + h + 20, width: w, height: h });
-  }
   // 놓으려는 자리가 다른 카드와 겹치면 안 겹칠 때까지 «아래»로 내린다.
   askDodge(cv, rect) {
     const { x, width: w, height: h } = rect;
@@ -553,15 +501,7 @@ export default class VaultSyncCollab extends Plugin {
     }
     return { x, y, width: w, height: h };
   }
-  async askAddCard(el, fields, kind) {
-    const found = this.canvasCardOf(el);
-    if (!found) return '⛔ 이 카드가 놓인 판을 못 찾았습니다';
-    const { cv, node } = found;
-    // `종류:` 가 있는 카드(지금은 «새 실험» 뿐)는 초록으로 — 흰 카드로 나면 판에서 안 갈린다.
-    return await this.askPlaceCard(cv, this.askFreeSpot(cv, node), this.askNewCardText(fields, kind),
-                                   fields && fields['종류'] ? ASK_NEW_COLOR : null);
-  }
-  // 판에 카드 한 장을 실제로 놓는다. [생성] 단추와 아래 «카드 메뉴» 단추가 같이 쓴다.
+  // 판에 카드 한 장을 실제로 놓는다. 판 아래 «카드 추가» 줄의 단추 셋이 같이 쓴다.
   async askPlaceCard(cv, spot, text, color) {
     let made = null;
     try {
@@ -572,7 +512,7 @@ export default class VaultSyncCollab extends Plugin {
                                    text, focus: false, save: true });
         if (made && typeof made.moveAndResize === 'function') made.moveAndResize(spot);
       }
-    } catch (e) { console.error('[sync] askAddCard(createTextNode)', e); made = null; }
+    } catch (e) { console.error('[sync] askPlaceCard(createTextNode)', e); made = null; }
     if (made) {
       // 고른 상태로 둔다 — 형이 곧바로 적을 수 있게. 편집까지 열리면 더 좋다(없는 판도 있어 감싼다).
       // 색은 만든 뒤에 준다 — `createTextNode` 는 색 인자를 안 받는다(판마다 손잡이가 달라 감싼다).
@@ -595,12 +535,12 @@ export default class VaultSyncCollab extends Plugin {
       cv.setData(d);
       if (typeof cv.requestSave === 'function') cv.requestSave();
       return '✅ 놓았습니다 (이건 Ctrl+Z 로 안 지워집니다)';
-    } catch (e) { console.error('[sync] askAddCard(setData)', e); return '⛔ 카드를 놓지 못했습니다'; }
+    } catch (e) { console.error('[sync] askPlaceCard(setData)', e); return '⛔ 카드를 놓지 못했습니다'; }
   }
-  /* ⭐ 캔버스 아래 «카드 추가» 줄에 우리 단추를 하나 더 놓는다 (형 지시 2026-08-16 —
-        「캔버스 UI 하단에 버튼 세 개 있는데 여기에도 우리 카드 만드는 버튼 못 넣냐」).
-     카드 «안»의 [생성] 은 **이미 있는 카드 옆에** 한 장 더 놓는 것이라, 판에 첫 물음 카드를
-     놓을 길이 없었다. 이 단추는 그 첫 장을 놓는다.
+  /* ⭐ 캔버스 아래 «카드 추가» 줄에 우리 단추 **셋**을 놓는다 — 물음 · 새 실험 · 돌리기.
+     (형 지시 2026-08-16 — 「물음, 새 실험, 돌리기 이거 각각을 버튼 하나하나 대응시켜 달라」.)
+     전에는 단추 하나를 눌러 메뉴에서 골랐다. 손이 두 번 갔고, 무엇을 놓을 수 있는지가 **누르기
+     전에는 안 보였다.** 이제 줄만 보면 셋이 다 보이고 한 번에 놓인다.
      ⚠️ 옵시디언이 그 줄에 붙이는 class 는 **공개 API 가 아니다.** 이름이 바뀌면 못 찾는데,
         그때는 **아무 일도 안 일어날 뿐**이다(단추가 안 보인다) — 판이 깨지지 않는다.
         그래서 이름을 하나로 못박지 않고 아래처럼 차례로 찾는다. */
@@ -630,16 +570,27 @@ export default class VaultSyncCollab extends Plugin {
     }
     return this.askDodge(cv, { x: Math.round(c.x - w / 2), y: Math.round(c.y - h / 2), width: w, height: h });
   }
-  // 누르면 뜨는 것 — 무엇을 놓을지 고른다. 종류가 늘면 여기 한 줄만 는다.
+  // 줄에 놓을 단추들 — 왼쪽부터 이 차례로 그린다. 종류가 늘면 여기 한 줄만 는다.
+  //  `icon` 은 옵시디언(lucide) 아이콘 이름이다. 그 이름이 없는 판에서는 못 그리는데,
+  //  그때는 `label` 을 글자로 찍어 **빈 단추를 안 남긴다**(askMenuBtn).
   askMenuKinds() {
-    return [{ label: '물음', kind: 'ask', kind2: null },
-            { label: '새 실험', kind: 'ask', kind2: '새실험' },
-            { label: '돌리기', kind: 'run', kind2: null }];
+    return [{ label: '물음', icon: 'help-circle', kind: 'ask', kind2: null },
+            { label: '새 실험', icon: 'flask-conical', kind: 'ask', kind2: '새실험' },
+            { label: '돌리기', icon: 'play', kind: 'run', kind2: null }];
   }
   async askMenuPlace(cv, item) {
     const fields = item.kind2 ? { '종류': item.kind2 } : {};
     return await this.askPlaceCard(cv, this.askMenuSpot(cv), this.askNewCardText(fields, item.kind),
                                    item.kind2 ? ASK_NEW_COLOR : null);
+  }
+  // 단추 한 개를 줄에 그린다. 생김새(자리·크기)는 옵시디언 단추의 class 를 그대로 물려받는다.
+  askMenuBtn(row, cv, item) {
+    const b = row.createDiv({ cls: 'canvas-card-menu-button lpms-cardmenu-btn' });
+    try { b.setAttribute('aria-label', item.label); } catch (e) {}
+    try { setIcon(b, item.icon); } catch (e) {}
+    if (!b.querySelector('svg')) { b.addClass('lpms-cardmenu-text'); b.setText(item.label); }
+    b.onclick = () => { this.askMenuPlace(cv, item); };
+    return b;
   }
   askMenuMount() {
     if (this._dead) return 0;
@@ -651,13 +602,9 @@ export default class VaultSyncCollab extends Plugin {
         if (!host || !cv) continue;
         const row = this.askCardMenuEl(host);
         if (!row || typeof row.querySelector !== 'function') continue;
-        if (row.querySelector('.lpms-cardmenu-btn')) continue;   // 이미 붙였다
-        const b = row.createDiv({ cls: 'canvas-card-menu-button lpms-cardmenu-btn' });
-        try { b.setAttribute('aria-label', 'LPMS 카드 놓기'); } catch (e) {}
-        // 아이콘 이름도 옵시디언 것이라 없을 수 있다 → 못 그렸으면 글자로 대신한다(빈 단추를 안 남긴다).
-        try { setIcon(b, 'help-circle'); } catch (e) {}
-        if (!b.querySelector('svg')) { b.addClass('lpms-cardmenu-text'); b.setText('물음'); }
-        b.onclick = (ev) => this.askMenuOpen(ev, cv);
+        // ⭐ 하나라도 이미 있으면 건너뛴다 — `layout-change` 마다 부르므로 이게 없으면 셋씩 쌓인다.
+        if (row.querySelector('.lpms-cardmenu-btn')) continue;
+        for (const item of this.askMenuKinds()) this.askMenuBtn(row, cv, item);
         n++;
       } catch (e) { console.error('[sync] askMenuMount', e); }
     }
@@ -665,18 +612,6 @@ export default class VaultSyncCollab extends Plugin {
   }
   // 판이 그려지는 데 시간이 걸린다 — 한 번만 부르면 놓친다. 몇 번 더 두드린다.
   askMenuSoon() { for (const d of [0, 300, 1200]) { try { window.setTimeout(() => this.askMenuMount(), d); } catch (e) {} } }
-  askMenuOpen(ev, cv) {
-    const items = this.askMenuKinds();
-    try {
-      const m = new Menu();
-      for (const it of items) m.addItem((i) => i.setTitle(it.label).onClick(() => this.askMenuPlace(cv, it)));
-      m.showAtMouseEvent(ev);
-    } catch (e) {
-      // 메뉴를 못 띄우는 자리면 «물음» 을 그냥 놓는다 — 눌렀는데 아무 일도 안 나는 것보다 낫다.
-      console.error('[sync] askMenuOpen', e);
-      this.askMenuPlace(cv, items[0]);
-    }
-  }
   async sendCanvasAsk({ board, kind, text, unit, channel, kind2 }) {
     if (!this.configured()) return { ok: false, msg: '⛔ 로그인부터 하십시오' };
     // ⭐ `종류:` 가 붙은 카드(지금은 «새 실험»)는 글이 없어도 뜻이 선다 — `▶ 돌리기` 와 같다.
