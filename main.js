@@ -11012,7 +11012,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       o.value = v;
     }
     sel.value = this.askChannelSeed(seed);
-    const add = this.askShowAdd(el, ctx) ? row.createEl("button", { cls: "lpms-ask-btn lpms-ask-add", text: "\uC0DD\uC131" }) : null;
+    const add = kind === "ask" && this.askShowAdd(el, ctx) ? row.createEl("button", { cls: "lpms-ask-btn lpms-ask-add", text: "\uC0DD\uC131" }) : null;
     const note = box.createDiv({ cls: "lpms-ask-note", text: "" });
     btn.onclick = async () => {
       if (btn.disabled) return;

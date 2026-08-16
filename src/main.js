@@ -442,11 +442,15 @@ export default class VaultSyncCollab extends Plugin {
     }
     sel.value = this.askChannelSeed(seed);
     // 「생성」 — 누르면 **누른 블록과 같은 종류**의 빈 카드가 바로 아래에 하나 더 생긴다.
-    //  ⭐ 물음·돌리기 «둘 다» 에 붙고 라벨도 하나다 (형 지시 2026-08-15 — 「그냥 생성으로 통일」).
+    //  ⭐ 라벨은 하나다 (형 지시 2026-08-15 — 「그냥 생성으로 통일」).
     //     카드마다 라벨이 다르면(「+ 물음」·「+ 돌리기」…) 판에 카드 종류가 늘 때마다 이름이 늘어난다.
     //     무엇이 생기는지는 **누른 그 카드**가 이미 말하고 있다.
+    //  ⛔ 물음(```lpms-ask)에만 붙는다 — 돌리기에는 안 붙인다 (형 지시 2026-08-16 —
+    //     「돌리기 판에서는 굳이 생성 버튼 필요없다」). 물음 카드는 카드마다 하나씩 달아 여럿 두는 것이
+    //     쓰임이지만, 돌리기는 **판 전체를 그대로 돌리는 것**이라 판에 한 장이면 된다. 두 장을 눌러 봐야
+    //     같은 요청이 두 번 갈 뿐이다.
     //  ⛔ 캔버스에서만 붙는다 — 노트(.md)에는 놓을 판이 없어 눌러도 할 일이 없다.
-    const add = this.askShowAdd(el, ctx)
+    const add = (kind === 'ask' && this.askShowAdd(el, ctx))
       ? row.createEl('button', { cls: 'lpms-ask-btn lpms-ask-add', text: '생성' }) : null;
     // 빈칸으로 둔다 — 누른 뒤 «올리는 중…»·«✅ 올렸습니다»·«⛔ …» 가 여기로 나온다(상태 표시줄).
     const note = box.createDiv({ cls: 'lpms-ask-note', text: '' });
