@@ -524,21 +524,25 @@ export default class VaultSyncCollab extends Plugin {
     while (s.length < 16) s += Math.floor(Math.random() * 16).toString(16);
     return s.slice(0, 16);
   }
-  // 놓으려는 자리가 다른 카드와 겹치면 안 겹칠 때까지 «아래»로 내린다.
+  /* 놓으려는 자리가 다른 카드와 겹치면 «조금씩» 비켜 본다.
+     ⛔ 예전에는 안 겹칠 때까지 **아래로 계속 내렸다.** 판이 빽빽하면 그게 카드 줄을 타고
+        **판 맨 아래까지** 내려가, 형이 보고 있는 화면에서 카드가 사라졌다 (형 신고 2026-08-17
+        — 「왜 맨 아랫쪽에 카드가 만들어지는지 모르겠음」). 파이프라인 판이 딱 그런 판이다.
+     이제는 오른아래로 40씩 **열두 번까지만** 비킨다. 그 안에 빈 자리가 없으면 **처음 자리
+     그대로** 놓는다 — 조금 겹쳐도 «보는 곳에» 있는 편이 낫다(손으로 끌면 그만이다). */
   askDodge(cv, rect) {
-    const { x, width: w, height: h } = rect;
-    let y = rect.y, rects = [];
+    const { width: w, height: h } = rect;
+    let rects = [];
     try {
       const d = typeof cv.getData === 'function' ? cv.getData() : null;
       rects = ((d && d.nodes) || []).filter((n) => n && typeof n.x === 'number' && typeof n.y === 'number');
     } catch (e) { console.error('[sync] askDodge', e); }
-    // 겹치면 그 카드 아래로 내린다. 늘 «아래»로만 가므로 멈춘다(맞물린 판을 대비해 횟수도 막아 둔다).
-    for (let i = 0; i < 200; i++) {
+    for (let i = 0; i <= 12; i++) {
+      const x = rect.x + i * 40, y = rect.y + i * 40;
       const hit = rects.find((n) => x < n.x + (n.width || 0) && n.x < x + w && y < n.y + (n.height || 0) && n.y < y + h);
-      if (!hit) break;
-      y = hit.y + (hit.height || 0) + 20;
+      if (!hit) return { x, y, width: w, height: h };
     }
-    return { x, y, width: w, height: h };
+    return { x: rect.x, y: rect.y, width: w, height: h };
   }
   // 판에 카드 한 장을 실제로 놓는다. 판 아래 «카드 추가» 줄의 단추 셋이 같이 쓴다.
   async askPlaceCard(cv, spot, text, color) {
@@ -593,12 +597,37 @@ export default class VaultSyncCollab extends Plugin {
       return (btn && btn.parentElement) || null;
     } catch (e) { console.error('[sync] askCardMenuEl', e); return null; }
   }
-  // 화면 가운데에 놓는다. 못 물으면 판 «맨 아래» 밑으로 — 적어도 다른 카드를 안 덮는다.
-  askMenuSpot(cv) {
+  /* 지금 보고 있는 화면의 «가운데»가 판 좌표로 어디인가. 못 물으면 null.
+     ⛔ 여기 쓰는 손잡이는 다 **문서에 없는 내부 API** 다. 여기(리눅스 서버)엔 옵시디언이 없어
+        어느 것이 있는지 잴 수가 없어서 **세 길로** 묻는다. 셋 다 안 되면 null 을 주고,
+        부르는 쪽이 판 맨 아래로 물러서면서 **형에게 그렇게 알린다**(조용히 물러서지 않는다).
+     ③ 은 «단추를 누른 자리» 다 — 그 줄은 화면 «아래 가운데» 에 있으므로 카드 높이만큼 위로 올려
+        카드가 줄을 덮지 않게 한다. */
+  askViewCenter(cv, evt, h) {
+    const num = (v) => typeof v === 'number' && isFinite(v);
+    const pt = (c) => (c && num(c.x) && num(c.y) ? { x: c.x, y: c.y } : null);
+    try {
+      const b = typeof cv.getViewportBBox === 'function' ? cv.getViewportBBox() : null;
+      if (b && num(b.minX) && num(b.maxX) && num(b.minY) && num(b.maxY))
+        return { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 };
+    } catch (e) { console.error('[sync] askViewCenter(bbox)', e); }
+    try { if (typeof cv.posCenter === 'function') { const c = pt(cv.posCenter()); if (c) return c; } }
+    catch (e) { console.error('[sync] askViewCenter(posCenter)', e); }
+    try {
+      if (evt && num(evt.clientX) && num(evt.clientY) && typeof cv.posFromEvt === 'function') {
+        const c = pt(cv.posFromEvt(evt));
+        if (c) return { x: c.x, y: c.y - (h || 200) };
+      }
+    } catch (e) { console.error('[sync] askViewCenter(posFromEvt)', e); }
+    return null;
+  }
+  // 놓을 자리 — **지금 보고 있는 화면** 가운데다 (형 지시 2026-08-17).
+  //  못 물으면 판 «맨 아래» 밑으로 물러서되, 그때는 왜 그리 됐는지를 알린다.
+  askMenuSpot(cv, evt) {
     const w = 400, h = 200;
-    let c = null;
-    try { if (typeof cv.posCenter === 'function') c = cv.posCenter(); } catch (e) {}
-    if (!c || typeof c.x !== 'number' || typeof c.y !== 'number') {
+    let c = this.askViewCenter(cv, evt, h);
+    if (!c) {
+      new Notice('보고 계신 자리를 못 물어 판 맨 아래에 놓았습니다 — #sync-plugin 에 알려 주십시오', 8000);
       try {
         const d = typeof cv.getData === 'function' ? cv.getData() : null;
         const ns = ((d && d.nodes) || []).filter((n) => n && typeof n.x === 'number' && typeof n.y === 'number');
@@ -617,9 +646,9 @@ export default class VaultSyncCollab extends Plugin {
             { label: '새 실험', icon: 'flask-conical', kind: 'ask', kind2: '새실험' },
             { label: '돌리기', icon: 'play', kind: 'run', kind2: null }];
   }
-  async askMenuPlace(cv, item) {
+  async askMenuPlace(cv, item, evt) {
     const fields = item.kind2 ? { '종류': item.kind2 } : {};
-    return await this.askPlaceCard(cv, this.askMenuSpot(cv), this.askNewCardText(fields, item.kind),
+    return await this.askPlaceCard(cv, this.askMenuSpot(cv, evt), this.askNewCardText(fields, item.kind),
                                    item.kind2 ? ASK_NEW_COLOR : null);
   }
   // 단추 한 개를 줄에 그린다. 생김새(자리·크기)는 옵시디언 단추의 class 를 그대로 물려받는다.
@@ -628,7 +657,7 @@ export default class VaultSyncCollab extends Plugin {
     try { b.setAttribute('aria-label', item.label); } catch (e) {}
     try { setIcon(b, item.icon); } catch (e) {}
     if (!b.querySelector('svg')) { b.addClass('lpms-cardmenu-text'); b.setText(item.label); }
-    b.onclick = () => { this.askMenuPlace(cv, item); };
+    b.onclick = (evt) => { this.askMenuPlace(cv, item, evt); };   // 누른 자리도 넘긴다 — 화면을 못 물을 때 마지막 길
     return b;
   }
   askMenuMount() {
