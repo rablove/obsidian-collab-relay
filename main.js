@@ -10384,7 +10384,9 @@ var ASK_FIELDS = {
   "\uCC44\uB110": "\uCC44\uB110",
   channel: "\uCC44\uB110",
   "\uC885\uB958": "\uC885\uB958",
-  kind: "\uC885\uB958"
+  kind: "\uC885\uB958",
+  pr: "pr",
+  "\uD310": "\uD310"
 };
 var ASK_CHANNELS = {
   "": "\uC5EC\uAE30",
@@ -10399,12 +10401,22 @@ var ASK_CHANNELS = {
   "\uC140\uB9BC": "vega",
   "code-selim": "vega"
 };
-var ASK_KINDS = { "\uC0C8\uC2E4\uD5D8": 1, "\uC0C8 \uC2E4\uD5D8": 1, "newexp": 1 };
+var ASK_KINDS = {
+  "\uC0C8\uC2E4\uD5D8": 1,
+  "\uC0C8 \uC2E4\uD5D8": 1,
+  "newexp": 1,
+  "\uBA38\uC9C0": 1,
+  "merge": 1,
+  "PR\uBA38\uC9C0": 1,
+  "PR \uBA38\uC9C0": 1
+};
 var ASK_NEW_COLOR = "4";
 var ASK_FIELD_OK = {
   unit: (v) => /^\d+\.\d+$/.test(v),
   "\uCC44\uB110": (v) => Object.prototype.hasOwnProperty.call(ASK_CHANNELS, v.trim().toLowerCase()),
-  "\uC885\uB958": (v) => Object.prototype.hasOwnProperty.call(ASK_KINDS, v.trim())
+  "\uC885\uB958": (v) => Object.prototype.hasOwnProperty.call(ASK_KINDS, v.trim()),
+  pr: (v) => /^\d+$/.test(v.trim()),
+  "\uD310": (v) => !!v.trim()
 };
 var BIN_EXT = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", svg: "image/svg+xml" };
 var BIN_MAX = 2 * 1024 * 1024;
@@ -10651,6 +10663,8 @@ body.collab-canvassync-open .modal-close-button { display: none !important; }
 `;
 var VaultSyncCollab = class extends import_obsidian.Plugin {
   async onload() {
+    this.registerMarkdownCodeBlockProcessor("lpms-ask", (src, el, ctx) => this.renderAskBlock(src, el, ctx, "ask"));
+    this.registerMarkdownCodeBlockProcessor("lpms-run", (src, el, ctx) => this.renderAskBlock(src, el, ctx, "run"));
     await this.loadSettings();
     if (!this.settings.deviceId) {
       this.settings.deviceId = "dev-" + Math.random().toString(36).slice(2, 7);
@@ -10682,8 +10696,6 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     this._kickPath = null;
     this.hiddenPeers = /* @__PURE__ */ new Set();
     this.registerEditorExtension([this.compartment.of([]), this.editLock.of([])]);
-    this.registerMarkdownCodeBlockProcessor("lpms-ask", (src, el, ctx) => this.renderAskBlock(src, el, ctx, "ask"));
-    this.registerMarkdownCodeBlockProcessor("lpms-run", (src, el, ctx) => this.renderAskBlock(src, el, ctx, "run"));
     this.addSettingTab(new SettingTab(this.app, this));
     this.syncEl = this.addStatusBarItem();
     this.setSync("\uC2DC\uC791\u2026");
@@ -10729,6 +10741,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       }));
       this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.askMenuSoon()));
       this.askMenuSoon();
+      this.askRerenderOpen();
       this.registerDomEvent(window, "offline", () => this.setNet(false));
       this.registerDomEvent(window, "online", () => this.setNet(true));
       this.registerInterval(window.setInterval(() => this.refreshLock(), 3e3));
@@ -10918,6 +10931,31 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
        누르면 **서버에만** 요청 문서를 남긴다(ASK_DIR). 캔버스 파일은 안 건드린다 —
        판을 고쳐서 알리면 위 «열어 둔 캔버스» 문제를 그대로 지나기 때문이다.
        마크다운 체크상자 버튼은 그대로 둔다(이게 안 그려지는 곳에서도 눌리게). */
+  // 이 블록이 «판 위»인가 «보통 노트»인가. 둘은 보낼 글이 다르다(아래 renderAskBlock).
+  //  ① 넘어온 경로가 `.canvas` 면 판이다  ② `.md` 면 노트다  ③ 경로가 없으면 그려진 자리로 본다.
+  askOnCanvas(el, ctx) {
+    const p = String(ctx && ctx.sourcePath || "");
+    if (/\.canvas$/i.test(p)) return true;
+    if (p) return false;
+    try {
+      return !!(el && typeof el.closest === "function" && el.closest(".canvas-node"));
+    } catch (e) {
+      return false;
+    }
+  }
+  /* 보통 노트에서 누를 때 보낼 글 — **블록을 펜스까지 그대로 되만든다.**
+     ⭐ 카드 길과 일부러 다르다. 서버(`pipeline_canvas.card_body`)는 글에서 ```lpms-ask``` 블록을
+        찾아 머리 설정(`종류`·`pr`·`판`)을 읽는다. 걷어내 보내면 노트에는 판이 안 실려 오므로
+        「어느 판의 어느 PR 인가」가 통째로 사라진다 (형 지시 2026-08-17).
+     ⛔ **노트 «전체»를 보내지 않는다.** 두 가지가 어긋난다:
+        ① 노트에 머리말(frontmatter)이 있으면 서버의 `t.split("\n---")` 이 거기서 잘라
+           **본문이 통째로 버려지고 머리말만 물음으로** 남는다.
+        ② PR 노트처럼 diff 가 든 글은 「형이 적으신 것」으로 통째로 채널에 실린다.
+     그래서 노트에서는 **블록 «안»에 적은 것이 물음**이다 (카드는 카드 글이 물음 — 예전 그대로).
+     `src` 는 옵시디언이 준 블록 속 원본이라 DOM 도 ctx 도 안 탄다. */
+  askBlockRaw(src, kind) {
+    return "```lpms-" + (kind === "run" ? "run" : "ask") + "\n" + String(src == null ? "" : src) + "\n```";
+  }
   // 버튼이 놓인 «그 카드»에 적힌 글을 읽는다. 두 길을 차례로 본다.
   askCardText(el, ctx) {
     let raw = "";
@@ -11007,13 +11045,14 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
     sel.value = this.askChannelSeed(seed);
     const note = box.createDiv({ cls: "lpms-ask-note", text: "" });
+    const onCanvas = this.askOnCanvas(el, ctx);
     btn.onclick = async () => {
       if (btn.disabled) return;
       btn.disabled = true;
       note.setText("\uC62C\uB9AC\uB294 \uC911\u2026");
       const af = this.app.workspace.getActiveFile();
-      const board = ctx && ctx.sourcePath || (af ? af.path : "");
-      const text2 = inner || this.askCardText(el, ctx);
+      const board = onCanvas ? ctx && ctx.sourcePath || (af ? af.path : "") : null;
+      const text2 = onCanvas ? inner || this.askCardText(el, ctx) : inner || seed["\uC885\uB958"] ? this.askBlockRaw(src, kind) : "";
       const r = await this.sendCanvasAsk({ board, kind, text: text2, unit, channel: sel.value, kind2: seed["\uC885\uB958"] });
       note.setText(r.msg);
       if (!r.ok) {
@@ -11243,6 +11282,20 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       }
     }
     return n;
+  }
+  /* 열려 있는 노트를 한 번 다시 그린다 (0.5.60).
+     ⭐ 옵시디언은 **그릴 때** 등록돼 있던 처리기만 쓴다. BRAT 로 업데이트하거나 플러그인을 껐다 켜면
+        그 노트는 이미 그려져 있어, 다시 그려질 때까지 ```lpms-ask``` 가 **코드블록 그대로** 남는다.
+        판(캔버스)은 카드가 나중에 그려져 이 문제가 안 보였다 — 노트에서만 보인다. */
+  askRerenderOpen() {
+    try {
+      for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+        const pm = leaf && leaf.view && leaf.view.previewMode;
+        if (pm && typeof pm.rerender === "function") pm.rerender(true);
+      }
+    } catch (e) {
+      console.error("[sync] askRerenderOpen", e);
+    }
   }
   // 판이 그려지는 데 시간이 걸린다 — 한 번만 부르면 놓친다. 몇 번 더 두드린다.
   askMenuSoon() {

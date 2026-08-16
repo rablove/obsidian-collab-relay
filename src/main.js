@@ -39,8 +39,10 @@ const ASK_DIR = '60_System/_canvas-ask';
 const ASK_MAX_PER_HOUR = 6;   // 실수로 눌러대도 세션이 수십 개 뜨지 않게 (canvas_watch.py 와 같은 상한)
 // 블록 «머리»에 놓는 설정 줄. 이름과 «값이 말이 되는가»까지 서버 `pipeline_canvas.head_fields` 와 같게 둔다 —
 // 두 쪽이 다르게 걷으면 카드에 적은 글이 어느 한쪽에서 사라진다.
+//  ⭐ `pr`·`판` 은 **판 밖(보통 노트)에서 누를 때** 쓰는 둘이다 (형 지시 2026-08-17). 노트에서 누르면
+//     「어느 판인가」가 요청에 안 실리므로 글이 말해야 한다. 서버 `pipeline_canvas._FIELD_NAMES` 와 같다.
 const ASK_FIELDS = { unit: 'unit', '단위': 'unit', '채널': '채널', channel: '채널',
-  '종류': '종류', kind: '종류' };
+  '종류': '종류', kind: '종류', pr: 'pr', '판': '판' };
 // 아는 채널 값 → 드롭다운에서 그것이 가리키는 항목. 이름표(어느 채널로 실제로 가나)는 서버
 // `pipeline_canvas.CHANNELS` 한 곳에만 두고, 여기는 «고를 수 있는 값인가»만 본다.
 const ASK_CHANNELS = { '': '여기', '여기': '여기', 'code': '여기', '기본': '여기', 'base': '여기',
@@ -48,12 +50,16 @@ const ASK_CHANNELS = { '': '여기', '여기': '여기', 'code': '여기', '기�
 // 카드가 스스로 말하는 «나는 무슨 카드인가». 지금은 «새 실험»(판을 만들어 달라) 하나뿐이다.
 //  ⭐ 이걸 카드 글에 두는 까닭: 서버가 id(`doc-newexp`)로만 가리면 [생성]·복제로 나온 카드는 id 가
 //     무작위 hex 라 «새 실험» 이 조용히 그냥 물음이 된다. 서버 `pipeline_canvas.EXPREQ_KINDS` 와 같게 둔다.
-const ASK_KINDS = { '새실험': 1, '새 실험': 1, 'newexp': 1 };
+//  ⭐ «머지» 도 여기 있다 — 없으면 `종류: 머지` 가 「아는 이름인데 값이 아니다」로 걸려 설정이 아니라
+//     **글**로 읽힌다. 그러면 그 줄이 물음으로 나가고 머지 뜻은 사라진다(서버 `MERGE_KINDS` 와 같다).
+const ASK_KINDS = { '새실험': 1, '새 실험': 1, 'newexp': 1,
+  '머지': 1, 'merge': 1, 'PR머지': 1, 'PR 머지': 1 };
 const ASK_NEW_COLOR = '4';   // 새 실험 카드는 초록으로 — 흰 카드면 판에서 안 갈린다
 // ⛔ 값까지 봐야 설정이다. 이름만 보면 형이 적은 「채널: 이 얘기는 어디서 하죠?」 가 설정으로 먹혀 물음이 사라진다.
 const ASK_FIELD_OK = { unit: (v) => /^\d+\.\d+$/.test(v),
   '채널': (v) => Object.prototype.hasOwnProperty.call(ASK_CHANNELS, v.trim().toLowerCase()),
-  '종류': (v) => Object.prototype.hasOwnProperty.call(ASK_KINDS, v.trim()) };
+  '종류': (v) => Object.prototype.hasOwnProperty.call(ASK_KINDS, v.trim()),
+  pr: (v) => /^\d+$/.test(v.trim()), '판': (v) => !!v.trim() };
 // ⛔ 아래 «그림·캔버스» 관련은 main-db(이 플러그인) 전용이다 — ai-study-sync 에는 «일부러» 넣지 않았다
 //    (형 지시 2026-08-13: 「ai-study-db는 해당 없으니 main-db에 한해서」). 그래서 두 소스의 차이가
 //    18줄에서 크게 벌어져 있다. 다음에 두 파일을 맞출 때 여기를 통째로 옮기면 그림·캔버스가
@@ -169,6 +175,12 @@ body.collab-canvassync-open .modal-close-button { display: none !important; }
 
 export default class VaultSyncCollab extends Plugin {
   async onload() {
+    // ⭐ **맨 먼저 등록한다 — `await` 보다 앞에.** 옵시디언은 처리기가 등록돼 있는 노트만 단추로 그린다.
+    //    `await this.loadSettings()` 뒤에 두면 그 사이에 이미 그려진 노트는 **코드블록 그대로** 남는다
+    //    (다시 그려질 때까지). 등록은 손잡이만 거는 것이라 설정이 필요 없다.
+    //    캔버스 카드·보통 노트의 ```lpms-ask / ```lpms-run 을 진짜 버튼으로 그린다.
+    this.registerMarkdownCodeBlockProcessor('lpms-ask', (src, el, ctx) => this.renderAskBlock(src, el, ctx, 'ask'));
+    this.registerMarkdownCodeBlockProcessor('lpms-run', (src, el, ctx) => this.renderAskBlock(src, el, ctx, 'run'));
     await this.loadSettings();
     if (!this.settings.deviceId) { this.settings.deviceId = 'dev-' + Math.random().toString(36).slice(2, 7); await this.saveSettings(); }
     if (!this.settings.deviceLabel) { this.settings.deviceLabel = 'dev-' + Math.random().toString(36).slice(2, 5); await this.saveSettings(); }
@@ -185,10 +197,6 @@ export default class VaultSyncCollab extends Plugin {
     this._kickUntil = 0; this._kickScope = null; this._kickPath = null; this.hiddenPeers = new Set();
 
     this.registerEditorExtension([this.compartment.of([]), this.editLock.of([])]);
-    // 캔버스 카드·노트의 ```lpms-ask / ```lpms-run 을 진짜 버튼으로 그린다.
-    // 안 그려지면(그 렌더 경로에 처리기가 안 걸리면) 그냥 코드블록으로 보인다 — 체크상자 버튼은 그대로 있다.
-    this.registerMarkdownCodeBlockProcessor('lpms-ask', (src, el, ctx) => this.renderAskBlock(src, el, ctx, 'ask'));
-    this.registerMarkdownCodeBlockProcessor('lpms-run', (src, el, ctx) => this.renderAskBlock(src, el, ctx, 'run'));
     this.addSettingTab(new SettingTab(this.app, this));
     this.syncEl = this.addStatusBarItem(); this.setSync('시작…');
     this.collabEl = this.addStatusBarItem(); this.setCollab('연결 안됨');
@@ -222,6 +230,7 @@ export default class VaultSyncCollab extends Plugin {
       this.registerEvent(this.app.workspace.on('layout-change', () => { this.canvasReconcile(); this.askMenuSoon(); }));
       this.registerEvent(this.app.workspace.on('active-leaf-change', () => this.askMenuSoon()));
       this.askMenuSoon();   // 이미 열려 있는 판에도 붙인다(플러그인을 켤 때·업데이트 직후)
+      this.askRerenderOpen();   // 이미 «그려져 있는» 노트도 한 번 다시 그린다 — 안 그러면 코드블록 그대로 남는다
       // 네트워크 끊김/복구를 즉시 감지 → 편집잠금 갱신 + 복구 시 바로 서버 변경분 당겨받기
       this.registerDomEvent(window, 'offline', () => this.setNet(false));
       this.registerDomEvent(window, 'online', () => this.setNet(true));
@@ -348,6 +357,28 @@ export default class VaultSyncCollab extends Plugin {
      누르면 **서버에만** 요청 문서를 남긴다(ASK_DIR). 캔버스 파일은 안 건드린다 —
      판을 고쳐서 알리면 위 «열어 둔 캔버스» 문제를 그대로 지나기 때문이다.
      마크다운 체크상자 버튼은 그대로 둔다(이게 안 그려지는 곳에서도 눌리게). */
+  // 이 블록이 «판 위»인가 «보통 노트»인가. 둘은 보낼 글이 다르다(아래 renderAskBlock).
+  //  ① 넘어온 경로가 `.canvas` 면 판이다  ② `.md` 면 노트다  ③ 경로가 없으면 그려진 자리로 본다.
+  askOnCanvas(el, ctx) {
+    const p = String((ctx && ctx.sourcePath) || '');
+    if (/\.canvas$/i.test(p)) return true;
+    if (p) return false;
+    try { return !!(el && typeof el.closest === 'function' && el.closest('.canvas-node')); }
+    catch (e) { return false; }
+  }
+  /* 보통 노트에서 누를 때 보낼 글 — **블록을 펜스까지 그대로 되만든다.**
+     ⭐ 카드 길과 일부러 다르다. 서버(`pipeline_canvas.card_body`)는 글에서 ```lpms-ask``` 블록을
+        찾아 머리 설정(`종류`·`pr`·`판`)을 읽는다. 걷어내 보내면 노트에는 판이 안 실려 오므로
+        「어느 판의 어느 PR 인가」가 통째로 사라진다 (형 지시 2026-08-17).
+     ⛔ **노트 «전체»를 보내지 않는다.** 두 가지가 어긋난다:
+        ① 노트에 머리말(frontmatter)이 있으면 서버의 `t.split("\n---")` 이 거기서 잘라
+           **본문이 통째로 버려지고 머리말만 물음으로** 남는다.
+        ② PR 노트처럼 diff 가 든 글은 「형이 적으신 것」으로 통째로 채널에 실린다.
+     그래서 노트에서는 **블록 «안»에 적은 것이 물음**이다 (카드는 카드 글이 물음 — 예전 그대로).
+     `src` 는 옵시디언이 준 블록 속 원본이라 DOM 도 ctx 도 안 탄다. */
+  askBlockRaw(src, kind) {
+    return '```lpms-' + (kind === 'run' ? 'run' : 'ask') + '\n' + String(src == null ? '' : src) + '\n```';
+  }
   // 버튼이 놓인 «그 카드»에 적힌 글을 읽는다. 두 길을 차례로 본다.
   askCardText(el, ctx) {
     let raw = '';
@@ -433,13 +464,21 @@ export default class VaultSyncCollab extends Plugin {
     sel.value = this.askChannelSeed(seed);
     // 빈칸으로 둔다 — 누른 뒤 «올리는 중…»·«✅ 올렸습니다»·«⛔ …» 가 여기로 나온다(상태 표시줄).
     const note = box.createDiv({ cls: 'lpms-ask-note', text: '' });
+    // 판 위인가 보통 노트인가 — 보낼 것이 다르다. 그릴 때 재 두면 누를 때 DOM 이 바뀌어 있어도 같다.
+    const onCanvas = this.askOnCanvas(el, ctx);
     btn.onclick = async () => {
       if (btn.disabled) return;
       btn.disabled = true; note.setText('올리는 중…');
       const af = this.app.workspace.getActiveFile();
-      const board = (ctx && ctx.sourcePath) || (af ? af.path : '');
+      // ⛔ 노트에서는 판을 안 싣는다 — 노트 경로를 판이라고 보내면 서버가 그 판을 못 읽는다.
+      //    어느 판인지는 블록의 `판:` 이 말한다(서버가 그걸로 판을 연다).
+      const board = onCanvas ? ((ctx && ctx.sourcePath) || (af ? af.path : '')) : null;
       // ⭐ 누를 때 읽는다 — 그려 놓고 나서 형이 이어 적은 것까지 담기게.
-      const text = inner || this.askCardText(el, ctx);
+      //    노트면 **블록이 든 원본 그대로**, 판이면 예전처럼 카드 글을 걷어내 보낸다.
+      //    ⛔ 노트에서 블록이 «아주 비어 있으면»(적은 글도 `종류:` 도 없으면) 빈 글로 둔다 —
+      //       그래야 아래 sendCanvasAsk 의 「빈 물음은 안 나간다」가 그대로 걸린다.
+      const text = onCanvas ? (inner || this.askCardText(el, ctx))
+                            : ((inner || seed['종류']) ? this.askBlockRaw(src, kind) : '');
       const r = await this.sendCanvasAsk({ board, kind, text, unit, channel: sel.value, kind2: seed['종류'] });
       note.setText(r.msg);
       if (!r.ok) { btn.disabled = false; return; }
@@ -609,6 +648,18 @@ export default class VaultSyncCollab extends Plugin {
       } catch (e) { console.error('[sync] askMenuMount', e); }
     }
     return n;
+  }
+  /* 열려 있는 노트를 한 번 다시 그린다 (0.5.60).
+     ⭐ 옵시디언은 **그릴 때** 등록돼 있던 처리기만 쓴다. BRAT 로 업데이트하거나 플러그인을 껐다 켜면
+        그 노트는 이미 그려져 있어, 다시 그려질 때까지 ```lpms-ask``` 가 **코드블록 그대로** 남는다.
+        판(캔버스)은 카드가 나중에 그려져 이 문제가 안 보였다 — 노트에서만 보인다. */
+  askRerenderOpen() {
+    try {
+      for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
+        const pm = leaf && leaf.view && leaf.view.previewMode;
+        if (pm && typeof pm.rerender === 'function') pm.rerender(true);
+      }
+    } catch (e) { console.error('[sync] askRerenderOpen', e); }
   }
   // 판이 그려지는 데 시간이 걸린다 — 한 번만 부르면 놓친다. 몇 번 더 두드린다.
   askMenuSoon() { for (const d of [0, 300, 1200]) { try { window.setTimeout(() => this.askMenuMount(), d); } catch (e) {} } }
