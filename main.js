@@ -11066,7 +11066,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     if (fields && fields["\uCC44\uB110"]) L.push("\uCC44\uB110: " + fields["\uCC44\uB110"]);
     if (fields && fields["\uC885\uB958"]) L.push("\uC885\uB958: " + fields["\uC885\uB958"]);
     L.push("```");
-    return L.join("\n");
+    return L.join("\n") + "\n";
   }
   // 옵시디언이 카드에 붙이는 것과 같은 «무작위 16자리 hex».
   //  ⛔ `unit-`·`alt-`·`doc-`·`ans-`·`q-`·`part-` 로 시작하면 안 된다 — 도구(`pipeline_canvas._MINE`)가

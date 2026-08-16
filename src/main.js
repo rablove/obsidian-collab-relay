@@ -490,7 +490,11 @@ export default class VaultSyncCollab extends Plugin {
     if (fields && fields['채널']) L.push('채널: ' + fields['채널']);
     if (fields && fields['종류']) L.push('종류: ' + fields['종류']);
     L.push('```');
-    return L.join('\n');
+    // ⭐ 닫는 ``` 뒤에 **빈 줄 하나**를 둔다 (형 지시 2026-08-16). 카드가 편집으로 열리면서
+    //  커서가 글 끝에 놓이는데, 이 줄이 없으면 커서가 닫는 ``` 끝에 붙어 **블록 «안»에 적히기
+    //  시작한다.** 그러면 적은 글이 머리 설정으로 읽혀 물음이 빈 채로 나간다. 한 줄 두면 곧바로
+    //  블록 «아래»에 적힌다. 읽는 쪽은 `cleanAskText` 가 앞뒤 빈 줄을 걷어내므로 지장 없다.
+    return L.join('\n') + '\n';
   }
   // 옵시디언이 카드에 붙이는 것과 같은 «무작위 16자리 hex».
   //  ⛔ `unit-`·`alt-`·`doc-`·`ans-`·`q-`·`part-` 로 시작하면 안 된다 — 도구(`pipeline_canvas._MINE`)가
