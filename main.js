@@ -11606,14 +11606,52 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       await this.collabAbsorb(p);
       return;
     }
-    let content;
-    try {
-      content = await this.app.vault.adapter.read(file.path);
-    } catch (e) {
-      return;
+    await this.upQueue(p, async () => {
+      if (this.applying || Date.now() < (this._suppressUntil || 0)) return;
+      let content;
+      try {
+        content = await this.app.vault.adapter.read(file.path);
+      } catch (e) {
+        return;
+      }
+      if (this.shadow.get(p) === content) return;
+      await this.upsert(p, content, file.stat && file.stat.mtime || Date.now());
+    });
+  }
+  /* 같은 경로의 «올리는 일»을 한 줄로 세운다 (0.5.63, 2026-08-17 — 형 신고: 판 충돌).
+     ⛔ 이게 없으면 캔버스 카드 하나를 끌 때마다 사본이 날 수 있었다. 옵시디언 캔버스는 판을
+        메모리에 들고 있다가 **짧은 사이에 파일을 여러 번** 쓴다. `modify` 는 그때마다 오고
+        옵시디언은 처리기를 기다려 주지 않으므로 `upsert` 가 **겹쳐 돌았다**. 겹치면 둘 다
+        같은 옛 서버본을 GET 해 놓고 각자 PUT 해서, **기준선(shadow)과 서버가 서로 다른
+        판본에 놓인다.** 그 뒤 한 번 더 끌면 base·local·server 셋이 다 갈리는데 —
+        캔버스는 JSON 이라 3-way 병합을 안 하니(`canMerge` 가 `.md` 만 참) 곧장 사본이다.
+        실제로 그렇게 났다: 길이가 base/local/server 32441 로 셋 다 같고 카드 하나의 x·y
+        숫자만 달랐다(자릿수가 같아 길이가 안 변했다).
+     ⭐ 파일 읽기를 **줄 안에서** 한다 — 그래야 기다리는 사이에 형이 더 끈 것까지 담기고,
+        앞의 것이 이미 올린 판본이면 `shadow` 견주기에서 조용히 멈춘다(여러 번이 하나로 합쳐진다).
+     앞의 것이 실패해도 뒤의 것은 돈다(`then(f, f)`) — 한 번 어긋나서 그 파일이 영영 안 올라가면 안 된다. */
+  upQueue(p, fn) {
+    if (!this._upQ) {
+      this._upQ = /* @__PURE__ */ new Map();
+      this._upRun = /* @__PURE__ */ new Set();
     }
-    if (this.shadow.get(p) === content) return;
-    await this.upsert(p, content, file.stat && file.stat.mtime || Date.now());
+    const run = async () => {
+      this._upRun.add(p);
+      try {
+        return await fn();
+      } finally {
+        this._upRun.delete(p);
+      }
+    };
+    const prev = this._upQ.get(p) || Promise.resolve();
+    const next = prev.then(run, run).catch((e) => {
+      console.error("[sync] upQueue", e);
+    });
+    this._upQ.set(p, next);
+    next.then(() => {
+      if (this._upQ.get(p) === next) this._upQ.delete(p);
+    });
+    return next;
   }
   async onLocalDelete(rawPath) {
     if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured() || !this.isSyncPath(rawPath) || this._ignored(rawPath)) return;
@@ -11914,9 +11952,35 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       }
     }
   }
+  // 삭제 tombstone 은 path 가 없다 → _id 에서 접두어(cvs:)를 벗겨 실제 로컬 경로를 얻는다.
+  docPath(doc2) {
+    const pfx = this.settings.docPrefix || "";
+    return doc2.path || (doc2._id && doc2._id.indexOf(pfx) === 0 ? doc2._id.slice(pfx.length) : doc2._id);
+  }
+  /* ⭐ 받는 쪽도 «같은 줄»에 세운다 (0.5.63, 2026-08-17 — 형 신고: 판 충돌).
+     ⛔ 이게 없으면 카드 하나를 끄는 사이에 사본이 났다. `applyRemote` 는 파일을 읽고(await)
+        서버 판본과 견준 뒤 `shadow` 를 옮기는데, **읽는 사이에 `onLocal` 이 끼어들면** 그
+        견줌이 낡은 것을 보고 판정한다. 실제로 이렇게 났다:
+        ① 끌기 → `upsert` 가 P2 를 올리고 `shadow`=P2
+        ② changes 피드가 **한 판 앞선** P1 을 되돌려 준다 → `applyRemote(P1)` 이 파일을 읽는다
+        ③ 읽는 사이에 ①이 끝나 `shadow` 가 P2 로 옮겨 간다
+        ④ `applyRemote` 가 깨어나 `local(P2) === base(P2)` 를 보고 **「서버만 바뀜」** 으로 읽어
+           파일을 P1 로 되돌리고 `shadow`=P1 → **서버(P2)와 기준선(P1)이 어긋난다**
+        ⑤ 그 다음 끌기(P3)에서 base·local·server 셋이 다 갈린다 → 캔버스는 3-way 병합을
+           안 하니(`canMerge` 가 `.md` 만 참) 곧장 사본.
+        진단 레코드가 그대로 말해 줬다: `길이 base/local/server=32441/32441/32441`(카드 하나의
+        x·y 숫자만 달라 자릿수가 같다) · `첫불일치=25152`.
+     ⭐ 한 경로의 «올리기»와 «받기»가 절대 겹쳐 돌지 않으면 이 판정이 늘 최신을 보고 선다.
+     ⛔ `canvasLive` 가 `applyRemote` 를 **되부른다**(그리고 그 자신이 `applyRemote` 안에서
+        불린다) — 줄 안에서 또 줄을 서면 스스로를 기다려 영영 안 끝난다. 그래서 이미 그 경로의
+        줄 안이면 곧장 속을 부른다. */
   async applyRemote(doc2) {
-    const _pfx = this.settings.docPrefix || "";
-    const p = doc2.path || (doc2._id && doc2._id.indexOf(_pfx) === 0 ? doc2._id.slice(_pfx.length) : doc2._id);
+    const k = nfc(this.docPath(doc2) || "");
+    if (this._upRun && this._upRun.has(k)) return this.applyRemoteInner(doc2);
+    return this.upQueue(k, () => this.applyRemoteInner(doc2));
+  }
+  async applyRemoteInner(doc2) {
+    const p = this.docPath(doc2);
     if (this._ignored(p)) return false;
     if (this.isBinPath(p)) return this.applyRemoteBin(doc2, p);
     if (!this.isTextPath(p)) return false;
