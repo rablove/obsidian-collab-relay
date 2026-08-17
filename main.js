@@ -10932,16 +10932,26 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
        판을 고쳐서 알리면 위 «열어 둔 캔버스» 문제를 그대로 지나기 때문이다.
        마크다운 체크상자 버튼은 그대로 둔다(이게 안 그려지는 곳에서도 눌리게). */
   // 이 블록이 «판 위»인가 «보통 노트»인가. 둘은 보낼 글이 다르다(아래 renderAskBlock).
-  //  ① 넘어온 경로가 `.canvas` 면 판이다  ② `.md` 면 노트다  ③ 경로가 없으면 그려진 자리로 본다.
+  //  ① 넘어온 경로가 `.canvas` 면 판이다  ② `.md` 면 노트다  ③ 경로가 없으면 그려진 자리로 본다
+  //  ④ 그것도 못 가리면 **지금 열려 있는 것**이 판인가로 본다.
+  //  ⭐ ④ 를 더한 까닭 (2026-08-17, code 채널 실측): 판 위에서 [돌리기] 를 눌렀는데 요청에
+  //     `board` 가 null 로 갔다 — ①②③ 이 다 안 걸렸다는 뜻이다. ③ 의 `closest` 는 **그릴 때**
+  //     카드가 아직 판 DOM 에 안 붙어 있으면 못 찾고(코드블록은 떨어진 조각에 그려진다),
+  //     그러면 판에서 눌렀는데도 노트로 읽혀 서버가 «정본» 으로 알아듣고 막는다.
   askOnCanvas(el, ctx) {
     const p = String(ctx && ctx.sourcePath || "");
     if (/\.canvas$/i.test(p)) return true;
     if (p) return false;
     try {
-      return !!(el && typeof el.closest === "function" && el.closest(".canvas-node"));
+      if (el && typeof el.closest === "function" && el.closest(".canvas-node")) return true;
     } catch (e) {
-      return false;
     }
+    try {
+      const af = this.app.workspace.getActiveFile();
+      if (af && /\.canvas$/i.test(String(af.path || ""))) return true;
+    } catch (e) {
+    }
+    return false;
   }
   /* 보통 노트에서 누를 때 보낼 글 — **블록을 펜스까지 그대로 되만든다.**
      ⭐ 카드 길과 일부러 다르다. 서버(`pipeline_canvas.card_body`)는 글에서 ```lpms-ask``` 블록을
@@ -11045,15 +11055,26 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     }
     sel.value = this.askChannelSeed(seed);
     const note = box.createDiv({ cls: "lpms-ask-note", text: "" });
-    const onCanvas = this.askOnCanvas(el, ctx);
+    const drawnOnCanvas = this.askOnCanvas(el, ctx);
     btn.onclick = async () => {
       if (btn.disabled) return;
       btn.disabled = true;
       note.setText("\uC62C\uB9AC\uB294 \uC911\u2026");
       const af = this.app.workspace.getActiveFile();
+      const onCanvas = drawnOnCanvas || this.askOnCanvas(el, ctx);
       const board = onCanvas ? ctx && ctx.sourcePath || (af ? af.path : "") : null;
-      const text2 = onCanvas ? inner || this.askCardText(el, ctx) : inner || seed["\uC885\uB958"] ? this.askBlockRaw(src, kind) : "";
-      const r = await this.sendCanvasAsk({ board, kind, text: text2, unit, channel: sel.value, kind2: seed["\uC885\uB958"] });
+      const said = inner || seed["\uC885\uB958"] || seed["\uD310"] || seed.pr;
+      const text2 = onCanvas ? inner || this.askCardText(el, ctx) : said ? this.askBlockRaw(src, kind) : "";
+      const r = await this.sendCanvasAsk({
+        board,
+        kind,
+        text: text2,
+        unit,
+        channel: sel.value,
+        kind2: seed["\uC885\uB958"],
+        board2: seed["\uD310"],
+        pr: seed.pr
+      });
       note.setText(r.msg);
       if (!r.ok) {
         btn.disabled = false;
@@ -11343,7 +11364,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       }
     }
   }
-  async sendCanvasAsk({ board, kind, text: text2, unit, channel, kind2 }) {
+  async sendCanvasAsk({ board, kind, text: text2, unit, channel, kind2, board2, pr }) {
     if (!this.configured()) return { ok: false, msg: "\u26D4 \uB85C\uADF8\uC778\uBD80\uD130 \uD558\uC2ED\uC2DC\uC624" };
     if (kind === "ask" && !text2 && !kind2) return { ok: false, msg: "\u26D4 \uC774 \uCE74\uB4DC\uC5D0 \uBB3C\uC74C\uC744 \uC801\uACE0 \uB204\uB974\uC2ED\uC2DC\uC624" };
     const now = Date.now();
@@ -11355,6 +11376,8 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     const rec = { board: board || null, kind, text: text2 || "", unit: unit || null, at, device: dev };
     if (channel) rec["\uCC44\uB110"] = channel;
     if (kind2) rec["\uC885\uB958"] = kind2;
+    if (board2) rec["\uD310"] = board2;
+    if (pr) rec.pr = pr;
     try {
       const id2 = this.idFor(p);
       const res = await this.req("PUT", this.docUrl(id2), {

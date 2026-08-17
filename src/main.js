@@ -358,13 +358,25 @@ export default class VaultSyncCollab extends Plugin {
      판을 고쳐서 알리면 위 «열어 둔 캔버스» 문제를 그대로 지나기 때문이다.
      마크다운 체크상자 버튼은 그대로 둔다(이게 안 그려지는 곳에서도 눌리게). */
   // 이 블록이 «판 위»인가 «보통 노트»인가. 둘은 보낼 글이 다르다(아래 renderAskBlock).
-  //  ① 넘어온 경로가 `.canvas` 면 판이다  ② `.md` 면 노트다  ③ 경로가 없으면 그려진 자리로 본다.
+  //  ① 넘어온 경로가 `.canvas` 면 판이다  ② `.md` 면 노트다  ③ 경로가 없으면 그려진 자리로 본다
+  //  ④ 그것도 못 가리면 **지금 열려 있는 것**이 판인가로 본다.
+  //  ⭐ ④ 를 더한 까닭 (2026-08-17, code 채널 실측): 판 위에서 [돌리기] 를 눌렀는데 요청에
+  //     `board` 가 null 로 갔다 — ①②③ 이 다 안 걸렸다는 뜻이다. ③ 의 `closest` 는 **그릴 때**
+  //     카드가 아직 판 DOM 에 안 붙어 있으면 못 찾고(코드블록은 떨어진 조각에 그려진다),
+  //     그러면 판에서 눌렀는데도 노트로 읽혀 서버가 «정본» 으로 알아듣고 막는다.
   askOnCanvas(el, ctx) {
     const p = String((ctx && ctx.sourcePath) || '');
     if (/\.canvas$/i.test(p)) return true;
     if (p) return false;
-    try { return !!(el && typeof el.closest === 'function' && el.closest('.canvas-node')); }
-    catch (e) { return false; }
+    try { if (el && typeof el.closest === 'function' && el.closest('.canvas-node')) return true; }
+    catch (e) {}
+    // 경로도 없고 붙은 자리로도 못 가릴 때만 여기까지 온다 — 노트를 판으로 잘못 볼 일이 없다
+    // (노트로 그려질 땐 ① ② 에서 `sourcePath` 가 늘 온다).
+    try {
+      const af = this.app.workspace.getActiveFile();
+      if (af && /\.canvas$/i.test(String(af.path || ''))) return true;
+    } catch (e) {}
+    return false;
   }
   /* 보통 노트에서 누를 때 보낼 글 — **블록을 펜스까지 그대로 되만든다.**
      ⭐ 카드 길과 일부러 다르다. 서버(`pipeline_canvas.card_body`)는 글에서 ```lpms-ask``` 블록을
@@ -464,22 +476,31 @@ export default class VaultSyncCollab extends Plugin {
     sel.value = this.askChannelSeed(seed);
     // 빈칸으로 둔다 — 누른 뒤 «올리는 중…»·«✅ 올렸습니다»·«⛔ …» 가 여기로 나온다(상태 표시줄).
     const note = box.createDiv({ cls: 'lpms-ask-note', text: '' });
-    // 판 위인가 보통 노트인가 — 보낼 것이 다르다. 그릴 때 재 두면 누를 때 DOM 이 바뀌어 있어도 같다.
-    const onCanvas = this.askOnCanvas(el, ctx);
+    // 판 위인가 보통 노트인가 — 보낼 것이 다르다.
+    const drawnOnCanvas = this.askOnCanvas(el, ctx);
     btn.onclick = async () => {
       if (btn.disabled) return;
       btn.disabled = true; note.setText('올리는 중…');
       const af = this.app.workspace.getActiveFile();
+      // ⭐ 누를 때 **다시 한 번** 본다 (2026-08-17). 그릴 때는 카드가 아직 판 DOM 에 안 붙어
+      //    있어 `closest('.canvas-node')` 가 빈손이었을 수 있다 — 누를 때는 붙어 있다.
+      //    `||` 라 «판» 에서 «노트» 로 뒤집히지는 않는다. 넓히기만 한다.
+      const onCanvas = drawnOnCanvas || this.askOnCanvas(el, ctx);
       // ⛔ 노트에서는 판을 안 싣는다 — 노트 경로를 판이라고 보내면 서버가 그 판을 못 읽는다.
       //    어느 판인지는 블록의 `판:` 이 말한다(서버가 그걸로 판을 연다).
       const board = onCanvas ? ((ctx && ctx.sourcePath) || (af ? af.path : '')) : null;
       // ⭐ 누를 때 읽는다 — 그려 놓고 나서 형이 이어 적은 것까지 담기게.
       //    노트면 **블록이 든 원본 그대로**, 판이면 예전처럼 카드 글을 걷어내 보낸다.
-      //    ⛔ 노트에서 블록이 «아주 비어 있으면»(적은 글도 `종류:` 도 없으면) 빈 글로 둔다 —
+      //    ⛔ 노트에서 블록이 «아주 비어 있으면»(적은 글도 설정도 없으면) 빈 글로 둔다 —
       //       그래야 아래 sendCanvasAsk 의 「빈 물음은 안 나간다」가 그대로 걸린다.
+      //    ⭐ `판:`·`pr:` 만 적힌 블록도 «비지 않았다» (2026-08-17). 이 둘이 어느 판·어느 PR 인지를
+      //       말하는 자리라 걷어내 보내면 서버가 그 판을 못 읽고 **정본으로 알아듣는다** —
+      //       판 밖에서 누른 ▶ 세 번이 다 그렇게 막혔다.
+      const said = inner || seed['종류'] || seed['판'] || seed.pr;
       const text = onCanvas ? (inner || this.askCardText(el, ctx))
-                            : ((inner || seed['종류']) ? this.askBlockRaw(src, kind) : '');
-      const r = await this.sendCanvasAsk({ board, kind, text, unit, channel: sel.value, kind2: seed['종류'] });
+                            : (said ? this.askBlockRaw(src, kind) : '');
+      const r = await this.sendCanvasAsk({ board, kind, text, unit, channel: sel.value,
+        kind2: seed['종류'], board2: seed['판'], pr: seed.pr });
       note.setText(r.msg);
       if (!r.ok) { btn.disabled = false; return; }
       // 다시 누를 수는 있게 하되 바로는 아니다 — 손이 두 번 가서 세션이 둘 뜨는 것을 막는다.
@@ -692,7 +713,7 @@ export default class VaultSyncCollab extends Plugin {
   }
   // 판이 그려지는 데 시간이 걸린다 — 한 번만 부르면 놓친다. 몇 번 더 두드린다.
   askMenuSoon() { for (const d of [0, 300, 1200]) { try { window.setTimeout(() => this.askMenuMount(), d); } catch (e) {} } }
-  async sendCanvasAsk({ board, kind, text, unit, channel, kind2 }) {
+  async sendCanvasAsk({ board, kind, text, unit, channel, kind2, board2, pr }) {
     if (!this.configured()) return { ok: false, msg: '⛔ 로그인부터 하십시오' };
     // ⭐ `종류:` 가 붙은 카드(지금은 «새 실험»)는 글이 없어도 뜻이 선다 — `▶ 돌리기` 와 같다.
     //    「판 하나 만들어 주세요」가 그 자체로 요청이라, 글을 안 적었다고 막으면 [생성]·복제로
@@ -714,6 +735,12 @@ export default class VaultSyncCollab extends Plugin {
     // ⭐ «나는 무슨 카드인가» 도 함께 싣는다 — 서버가 판을 못 읽는 경우까지 곧게 갈린다.
     //    안 실으면 서버가 판에서 그 카드를 찾아 카드 글의 `종류:` 를 본다(되긴 하나 한 다리 건넌다).
     if (kind2) rec['종류'] = kind2;
+    // ⭐ «어느 판·어느 PR» 도 걷은 값 그대로 싣는다 (2026-08-17, code 채널 요청). 여태 이 둘은
+    //    `askHeadFields` 가 떼어내기만 하고 아무 데도 안 실려, 판 이름이 **글로도 요청으로도**
+    //    안 갔다 — 서버가 정본으로 알아들어 [돌리기] 세 번이 다 막혔다. `채널`·`종류` 와 같은 자리다.
+    //    글(`text`) 안의 블록에도 그대로 들어 있어 서버는 어느 쪽으로 읽어도 같은 값을 본다.
+    if (board2) rec['판'] = board2;
+    if (pr) rec.pr = pr;
     try {
       const id = this.idFor(p);
       // content 에 JSON 문자열을 둔다 — 하네스가 vaultio.read(경로) 로 그대로 읽는다.
