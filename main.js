@@ -11290,7 +11290,13 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     return [
       { label: "\uBB3C\uC74C", icon: "help-circle", kind: "ask", kind2: null },
       { label: "\uC0C8 \uC2E4\uD5D8", icon: "flask-conical", kind: "ask", kind2: "\uC0C8\uC2E4\uD5D8" },
-      { label: "\uB3CC\uB9AC\uAE30", icon: "play", kind: "run", kind2: null }
+      { label: "\uB3CC\uB9AC\uAE30", icon: "play", kind: "run", kind2: null },
+      // ⭐ «PR 머지» — 「이 판(실험)에 걸린 열린 PR 을 머지해 달라」 (형 지시 2026-08-18).
+      //    서버가 만드는 `doc-merge` 카드와 같은 글이라 서버 쪽은 손댈 것이 없다:
+      //    `종류: 머지` 만 보고 가린다(`canvas_watch` 의 `mergereq`). PR 번호는 안 적는다 —
+      //    어느 PR 인지는 실험 대장(`ledger`)이 판으로 찾는다. 한 개만 머지하려면
+      //    카드에 `pr: 84` 를 손으로 더한다.
+      { label: "PR \uBA38\uC9C0", icon: "git-merge", kind: "ask", kind2: "\uBA38\uC9C0" }
     ];
   }
   async askMenuPlace(cv, item, evt) {

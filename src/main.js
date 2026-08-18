@@ -665,10 +665,18 @@ export default class VaultSyncCollab extends Plugin {
   askMenuKinds() {
     return [{ label: '물음', icon: 'help-circle', kind: 'ask', kind2: null },
             { label: '새 실험', icon: 'flask-conical', kind: 'ask', kind2: '새실험' },
-            { label: '돌리기', icon: 'play', kind: 'run', kind2: null }];
+            { label: '돌리기', icon: 'play', kind: 'run', kind2: null },
+            // ⭐ «PR 머지» — 「이 판(실험)에 걸린 열린 PR 을 머지해 달라」 (형 지시 2026-08-18).
+            //    서버가 만드는 `doc-merge` 카드와 같은 글이라 서버 쪽은 손댈 것이 없다:
+            //    `종류: 머지` 만 보고 가린다(`canvas_watch` 의 `mergereq`). PR 번호는 안 적는다 —
+            //    어느 PR 인지는 실험 대장(`ledger`)이 판으로 찾는다. 한 개만 머지하려면
+            //    카드에 `pr: 84` 를 손으로 더한다.
+            { label: 'PR 머지', icon: 'git-merge', kind: 'ask', kind2: '머지' }];
   }
   async askMenuPlace(cv, item, evt) {
     const fields = item.kind2 ? { '종류': item.kind2 } : {};
+    // 색은 «종류가 붙은 카드»(새 실험·PR 머지)에만 준다 — 서버가 만드는 그 두 카드도 같은 초록이라
+    // (`pipeline_canvas.EXPREQ_COLOR`), 판에서 단추로 낸 것과 서버가 낸 것이 같아 보인다.
     return await this.askPlaceCard(cv, this.askMenuSpot(cv, evt), this.askNewCardText(fields, item.kind),
                                    item.kind2 ? ASK_NEW_COLOR : null);
   }
