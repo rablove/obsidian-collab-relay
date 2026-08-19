@@ -11823,6 +11823,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
           return;
         }
         if (rel !== "a") {
+          if (this._outdated) return void await this.lockedSkip(pNfc, "upsert-nobase", base, content, server.content, mtime, server);
           await this.logConflict(pNfc, "upsert-nobase", base, content, server.content, mtime, server.mtime || 0, server.lastEditor, server.clientVersion);
           await this.saveConflictCopy(pNfc, server.content, server.mtime || Date.now(), "server");
         }
@@ -11841,6 +11842,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
           return;
         }
         if (rel !== "a") {
+          if (this._outdated) return void await this.lockedSkip(pNfc, "upsert", base, content, server.content, mtime, server);
           await this.logConflict(pNfc, "upsert", base, content, server.content, mtime, server.mtime || 0, server.lastEditor, server.clientVersion);
           if (mtime >= (server.mtime || 0)) {
             await this.saveConflictCopy(pNfc, server.content, server.mtime || Date.now(), "server");
@@ -12172,6 +12174,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         this.shadow.set(p, local);
         return true;
       }
+      if (this._outdated) return await this.lockedSkip(p, "applyRemote", base, local, R, lm, doc2);
       const merged = this.canMerge(p) ? merge3(base, local, R) : null;
       if (merged !== null) {
         await this.writeLocal(p, merged);
@@ -12491,6 +12494,41 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     } catch (e) {
     }
     return "";
+  }
+  /* ── 낡아서 «올릴 수 없는» 기기에서는 사본을 만들지 않는다 (0.5.67, 2026-08-19 형 신고) ────
+     ⛔ 무슨 일이 있었나. 릴리스를 내면 그 순간 ① `checkVersion` 이 기기를 구버전으로 보고 편집을
+        잠그고 ② 서버 업로드 게이트가 그 아래 버전의 쓰기를 막는다. 그런데 **충돌 판정은 그대로
+        돌았다** — 올리지 못할 뿐, `upsert`·`applyRemote` 는 base·local·server 를 견줘 «양쪽 다
+        바뀜» 이면 사본을 만들었다. 그 사본도 못 올라가니 **그 기기에만 쌓이고**, 형에게는
+        「동시편집 충돌」 알림만 뜬다. 판(캔버스)은 편집잠금이 안 걸려(잠금은 편집기 확장이다)
+        카드를 끌 수 있으므로 이 길로 곧장 들어간다.
+     ⭐ 이제 그때는 **아무것도 안 한다** — 사본도 안 만들고, 형이 고친 파일을 서버본으로 **덮지도
+        않는다**(덮으면 올릴 수도 없는 편집이 사라진다). 기준선도 안 옮긴다. 업데이트하면 그
+        다음 바퀴에 여느 3-way 길로 곧게 간다.
+     ⭐ 레코드는 남긴다 — `_sync-diag/` 는 게이트에서 뺐다(`upload_gate.py`). 안 그러면 진단이
+        **정확히 봐야 할 때 눈을 감는다**(이번에 실제로 그랬다: 형은 충돌을 보셨는데 서버엔 0건). */
+  async lockedSkip(pNfc, where, base, local, server, localMtime, serverDoc) {
+    try {
+      await this.logConflict(
+        pNfc,
+        `locked-${where}`,
+        base,
+        local,
+        server,
+        localMtime,
+        serverDoc && serverDoc.mtime || 0,
+        serverDoc && serverDoc.lastEditor || null,
+        serverDoc && serverDoc.clientVersion || null
+      );
+    } catch (e) {
+      console.error("[sync] lockedSkip", e);
+    }
+    if (!this._lockNoted) this._lockNoted = /* @__PURE__ */ new Set();
+    if (!this._lockNoted.has(pNfc)) {
+      this._lockNoted.add(pNfc);
+      new import_obsidian.Notice(`\u{1F53A} \xAB${pNfc.split("/").pop()}\xBB \u2014 \uD50C\uB7EC\uADF8\uC778\uC774 \uB0A1\uC544 \uC62C\uB9AC\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uACE0\uCE58\uC2E0 \uAC83\uC740 \uADF8\uB300\uB85C \uB450\uC5C8\uC2B5\uB2C8\uB2E4 \xB7 BRAT \uC73C\uB85C \uC5C5\uB370\uC774\uD2B8\uD558\uBA74 \uADF8\uB54C \uC62C\uB77C\uAC11\uB2C8\uB2E4`, 1e4);
+    }
+    return false;
   }
   async saveConflictCopy(pNfc, content, mtime, tag) {
     const dot = pNfc.lastIndexOf(".");
@@ -12903,6 +12941,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       this._latestVer = latest;
       if (outdated !== this._outdated) {
         this._outdated = outdated;
+        if (!outdated) this._lockNoted = null;
         this.refreshLock();
       }
       if (outdated) {

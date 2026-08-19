@@ -1091,6 +1091,7 @@ export default class VaultSyncCollab extends Plugin {
         const rel = this._relate(content, server.content);
         if (rel === 'b') { await this.writeLocal(pNfc, server.content); this.shadow.set(pNfc, server.content); return; }   // 서버가 상위집합 → 서버본
         if (rel !== 'a') {   // 'a'(local 상위집합)면 아래 putDoc 로 올림. 그 외 진짜 분기만 사본.
+          if (this._outdated) return void await this.lockedSkip(pNfc, 'upsert-nobase', base, content, server.content, mtime, server);
           await this.logConflict(pNfc, 'upsert-nobase', base, content, server.content, mtime, server.mtime || 0, server.lastEditor, server.clientVersion);
           await this.saveConflictCopy(pNfc, server.content, server.mtime || Date.now(), 'server');
         }
@@ -1100,6 +1101,7 @@ export default class VaultSyncCollab extends Plugin {
         const rel = this._relate(content, server.content);   // 병합 불가 → 사소한 포함관계면 상위집합
         if (rel === 'b') { await this.writeLocal(pNfc, server.content); this.shadow.set(pNfc, server.content); return; }   // 서버가 상위집합 → 서버본
         if (rel !== 'a') {   // 'a'(local 상위집합)면 아래 putDoc 로 올림. 그 외 진짜 분기만 사본.
+          if (this._outdated) return void await this.lockedSkip(pNfc, 'upsert', base, content, server.content, mtime, server);
           await this.logConflict(pNfc, 'upsert', base, content, server.content, mtime, server.mtime || 0, server.lastEditor, server.clientVersion);
           if (mtime >= (server.mtime || 0)) { await this.saveConflictCopy(pNfc, server.content, server.mtime || Date.now(), 'server'); }
           else { await this.saveConflictCopy(pNfc, content, mtime, this.settings.deviceId || 'local'); await this.writeLocal(pNfc, server.content); this.shadow.set(pNfc, server.content); return; }
@@ -1304,6 +1306,8 @@ export default class VaultSyncCollab extends Plugin {
       //  .md 는 merge3(base, local, base) 가 local 을 그대로 내주어 안 드러났다 — 캔버스만 물렸다
       //  (캔버스는 JSON 이라 병합을 안 한다).
       if (R === base) { await this.putDoc(p, local, lm); this.shadow.set(p, local); return true; }
+      // ⛔ 낡아서 «올릴 수 없는» 기기면 사본을 만들지 않는다 (0.5.67 — lockedSkip 곁 주석)
+      if (this._outdated) return await this.lockedSkip(p, 'applyRemote', base, local, R, lm, doc);
       // 기준선 대비 양쪽 다 바뀜 → 진짜 동시편집 충돌 → 사본 보관
       const merged = this.canMerge(p) ? merge3(base, local, R) : null;   // 3-way 병합 — 겹치지 않으면 사본 없이 합침(양쪽 보존·수렴). 캔버스는 JSON 이라 안 합친다 → 아래 최신 승 + 사본
       if (merged !== null) {
@@ -1476,6 +1480,32 @@ export default class VaultSyncCollab extends Plugin {
   async readConflictLog() {
     try { const f = `${this.app.vault.configDir}/plugins/${this.manifest.id}/conflict-log.jsonl`; if (await this.app.vault.adapter.exists(f)) return await this.app.vault.adapter.read(f); } catch (e) {}
     return '';
+  }
+  /* ── 낡아서 «올릴 수 없는» 기기에서는 사본을 만들지 않는다 (0.5.67, 2026-08-19 형 신고) ────
+     ⛔ 무슨 일이 있었나. 릴리스를 내면 그 순간 ① `checkVersion` 이 기기를 구버전으로 보고 편집을
+        잠그고 ② 서버 업로드 게이트가 그 아래 버전의 쓰기를 막는다. 그런데 **충돌 판정은 그대로
+        돌았다** — 올리지 못할 뿐, `upsert`·`applyRemote` 는 base·local·server 를 견줘 «양쪽 다
+        바뀜» 이면 사본을 만들었다. 그 사본도 못 올라가니 **그 기기에만 쌓이고**, 형에게는
+        「동시편집 충돌」 알림만 뜬다. 판(캔버스)은 편집잠금이 안 걸려(잠금은 편집기 확장이다)
+        카드를 끌 수 있으므로 이 길로 곧장 들어간다.
+     ⭐ 이제 그때는 **아무것도 안 한다** — 사본도 안 만들고, 형이 고친 파일을 서버본으로 **덮지도
+        않는다**(덮으면 올릴 수도 없는 편집이 사라진다). 기준선도 안 옮긴다. 업데이트하면 그
+        다음 바퀴에 여느 3-way 길로 곧게 간다.
+     ⭐ 레코드는 남긴다 — `_sync-diag/` 는 게이트에서 뺐다(`upload_gate.py`). 안 그러면 진단이
+        **정확히 봐야 할 때 눈을 감는다**(이번에 실제로 그랬다: 형은 충돌을 보셨는데 서버엔 0건). */
+  async lockedSkip(pNfc, where, base, local, server, localMtime, serverDoc) {
+    try {
+      await this.logConflict(pNfc, `locked-${where}`, base, local, server, localMtime,
+                             (serverDoc && serverDoc.mtime) || 0,
+                             (serverDoc && serverDoc.lastEditor) || null,
+                             (serverDoc && serverDoc.clientVersion) || null);
+    } catch (e) { console.error('[sync] lockedSkip', e); }
+    if (!this._lockNoted) this._lockNoted = new Set();
+    if (!this._lockNoted.has(pNfc)) {   // 파일마다 한 번만 — 서버가 그 파일을 계속 고치면 알림이 쏟아진다
+      this._lockNoted.add(pNfc);
+      new Notice(`🔺 «${pNfc.split('/').pop()}» — 플러그인이 낡아 올리지 못했습니다. 고치신 것은 그대로 두었습니다 · BRAT 으로 업데이트하면 그때 올라갑니다`, 10000);
+    }
+    return false;
   }
   async saveConflictCopy(pNfc, content, mtime, tag) {
     const dot = pNfc.lastIndexOf('.'); const ext = dot > 0 ? pNfc.slice(dot) : '.md'; const bare = dot > 0 ? pNfc.slice(0, dot) : pNfc;
@@ -1730,7 +1760,7 @@ export default class VaultSyncCollab extends Plugin {
       const latest = String(rel.json.tag_name || '').replace(/^v/, '');
       const outdated = !!latest && this._isNewer(latest, this.manifest.version);
       this._latestVer = latest;
-      if (outdated !== this._outdated) { this._outdated = outdated; this.refreshLock(); }
+      if (outdated !== this._outdated) { this._outdated = outdated; if (!outdated) this._lockNoted = null; this.refreshLock(); }   // 풀리면 «한 번만 알림» 기억도 비운다
       // ⭐ 모달을 «세션당 한 번»만 띄우던 것을 고쳤다 (2026-08-13, 형 신고: 「업데이트 하라는 모달은 안 뜨고 편집만 막힌다」).
       //  전에는 `_updShown` 이 한 번 서면 계속 true 라, 형이 «확인»으로 닫는 순간 다시 뜨지 않았다. 그 플래그는
       //  버전을 안 봐서 **새 릴리스가 나와도** 그대로였다. 그동안 편집은 계속 잠겨 있으니, 남는 안내는 상태바 한 줄뿐인데
