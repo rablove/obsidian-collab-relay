@@ -225,6 +225,20 @@ export default class VaultSyncCollab extends Plugin {
     this.addCommand({ id: 'net-check', name: '연결 상태 확인(온라인/오프라인)', callback: async () => { const ok = await this.probeNet(); this.setNet(ok); new Notice(ok ? '🌐 서버 연결됨 (온라인)' : '🔒 서버 연결 안됨 (오프라인 — 편집잠금 대상)', 5000); } });
     this.addCommand({ id: 'update-info', name: '업데이트 안내 다시 보기(편집이 잠겼을 때)', callback: () => { this._verChk = 0; this.checkVersion(); } });
     this.addCommand({ id: 'conflict-log', name: '충돌 로그 보기', callback: async () => new ConflictLogModal(this.app, await this.readConflictLog()).open() });
+    // ⭐ 노트 본문에 LPMS 단추 넣기 (0.5.66) — 판 아래 줄의 단추 넷과 같은 종류다(askInsert 곁 주석).
+    for (const item of this.askMenuKinds()) {
+      this.addCommand({ id: `lpms-insert-${item.kind}-${item.kind2 || 'plain'}`, name: `LPMS 단추 넣기 — ${item.label}`,
+        editorCallback: (editor, view) => this.askInsert(editor, item, view && view.file && view.file.path) });
+    }
+    // 길게 누르기(모바일)·우클릭 메뉴에도 같은 넷을 단다 — 아이패드에서 명령 팔레트보다 손이 덜 간다.
+    try {
+      this.registerEvent(this.app.workspace.on('editor-menu', (menu, editor, view) => {
+        for (const item of this.askMenuKinds()) {
+          menu.addItem((mi) => mi.setTitle(`LPMS 단추 — ${item.label}`).setIcon(item.icon)
+            .onClick(() => this.askInsert(editor, item, view && view.file && view.file.path)));
+        }
+      }));
+    } catch (e) { console.error('[sync] editor-menu', e); }
 
     this.app.workspace.onLayoutReady(async () => {
       // 파일동기화 이벤트
@@ -538,6 +552,11 @@ export default class VaultSyncCollab extends Plugin {
     if (fields && fields.unit) L.push('unit: ' + fields.unit);
     if (fields && fields['채널']) L.push('채널: ' + fields['채널']);
     if (fields && fields['종류']) L.push('종류: ' + fields['종류']);
+    // ⭐ `판`·`pr` 은 **보통 노트에 넣을 때만** 채워진다 (0.5.66). 판 위의 카드는 요청에 판이
+    //    실려 가지만(`board`), 노트에는 그런 것이 없어 글이 「어느 판·어느 PR 인가」를 말해야 한다.
+    //    캔버스 쪽(askMenuPlace)은 이 둘을 안 넘기므로 예전 그대로다.
+    if (fields && fields['판']) L.push('판: ' + fields['판']);
+    if (fields && fields.pr) L.push('pr: ' + fields.pr);
     L.push('```');
     // ⭐ 닫는 ``` 뒤에 **빈 줄 하나**를 둔다 (형 지시 2026-08-16). 카드가 편집으로 열리면서
     //  커서가 글 끝에 놓이는데, 이 줄이 없으면 커서가 닫는 ``` 끝에 붙어 **블록 «안»에 적히기
@@ -671,6 +690,54 @@ export default class VaultSyncCollab extends Plugin {
       } catch (e) { c = { x: 0, y: 0 }; }
     }
     return this.askDodge(cv, { x: Math.round(c.x - w / 2), y: Math.round(c.y - h / 2), width: w, height: h });
+  }
+  /* ── 보통 노트(.md) 안에 단추를 «넣는» 길 (0.5.66, 2026-08-19 형 지시) ────────────────
+     형: 「본문 내에서도 버튼 구현을 해주면 좋겠는데 노트 본문 내에서도 그게 가능할까?」
+     ⭐ **그리는 것은 0.5.60 부터 이미 된다** — 노트에 ```lpms-ask``` 블록이 있으면 단추로 그려진다.
+        없던 것은 그 블록을 «놓는» 자리다. 판에는 아래 «카드 추가» 줄이 있지만 노트에는 그런 줄이
+        없다 → 명령(command)과 편집기 메뉴로 넣는다. 종류는 판의 단추 넷과 같다(`askMenuKinds`).
+     ⭐ 노트에서는 «어느 판인가»가 요청에 안 실린다(`board=null`) — 그래서 넣을 때 `판:` 을 채운다.
+        머리말(`판:`·`PR:`)에서 먼저 찾고, 없으면 **경로**에서 찾는다: 판 노트는
+        `…/판/<판 이름>/….md` 에 산다(판 파일 `…/판/<판 이름>.canvas` 와 같은 이름의 폴더).
+     ⛔ 못 찾으면 «빈 `판:`» 을 적지 않는다 — 값이 없는 설정 줄은 설정으로 안 읽혀 **물음 글로 샌다**
+        (`ASK_FIELD_OK`). 그럴 때는 그냥 빼고, 무엇을 적어야 하는지 알린다. */
+  askNoteSeed(text, path) {
+    const out = {};
+    const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(String(text || ''));
+    if (m) {
+      for (const line of m[1].split('\n')) {
+        const f = /^\s*([^\s:]+)\s*:\s*(.*)$/.exec(line);
+        if (!f) continue;
+        const k = f[1].trim().toLowerCase(), v = f[2].trim().replace(/^["']|["']$/g, '');
+        if (k === '판' && v) out['판'] = v;
+        if (k === 'pr' && /^\d+$/.test(v)) out.pr = v;
+      }
+    }
+    // 머리말에 없으면 경로에서 — `…/판/<판 이름>/….md`
+    if (!out['판'] && path) {
+      const seg = nfc(String(path)).split('/');
+      const i = seg.lastIndexOf('판');
+      if (i >= 0 && seg.length > i + 2) out['판'] = seg[i + 1];
+    }
+    return out;
+  }
+  // 커서 자리에 그 종류의 블록을 넣는다. 넣기만 하고 아무것도 안 보낸다 — 보내는 것은 형이 단추를 누를 때다.
+  askInsert(editor, item, path) {
+    if (!editor || typeof editor.replaceSelection !== 'function') return null;
+    let all = ''; try { all = editor.getValue ? editor.getValue() : ''; } catch (e) {}
+    const seed = this.askNoteSeed(all, path);
+    const fields = {};
+    if (item.kind2) fields['종류'] = item.kind2;
+    if (seed['판']) fields['판'] = seed['판'];
+    if (item.kind2 === '머지' && seed.pr) fields.pr = seed.pr;
+    const text = this.askNewCardText(fields, item.kind);
+    editor.replaceSelection(text);
+    // ⛔ 판이 필요한 둘(▶ 돌리기·PR 머지)인데 판을 못 찾았으면 «조용히» 넘어가지 않는다.
+    //    그대로 누르면 서버가 정본으로 알아듣거나 「대장에 안 걸려 있습니다」로 막힌다.
+    if (!seed['판'] && (item.kind === 'run' || item.kind2 === '머지')) {
+      new Notice(`⚠️ 이 노트에서 «어느 판»인지를 못 찾았습니다 — 블록에 «판: EXP-0NN — …» 한 줄을 적어 주십시오`, 9000);
+    }
+    return text;
   }
   // 줄에 놓을 단추들 — 왼쪽부터 이 차례로 그린다. 종류가 늘면 여기 한 줄만 는다.
   //  `icon` 은 옵시디언(lucide) 아이콘 이름이다. 그 이름이 없는 판에서는 못 그리는데,

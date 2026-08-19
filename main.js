@@ -10734,6 +10734,22 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       this.checkVersion();
     } });
     this.addCommand({ id: "conflict-log", name: "\uCDA9\uB3CC \uB85C\uADF8 \uBCF4\uAE30", callback: async () => new ConflictLogModal(this.app, await this.readConflictLog()).open() });
+    for (const item of this.askMenuKinds()) {
+      this.addCommand({
+        id: `lpms-insert-${item.kind}-${item.kind2 || "plain"}`,
+        name: `LPMS \uB2E8\uCD94 \uB123\uAE30 \u2014 ${item.label}`,
+        editorCallback: (editor, view) => this.askInsert(editor, item, view && view.file && view.file.path)
+      });
+    }
+    try {
+      this.registerEvent(this.app.workspace.on("editor-menu", (menu, editor, view) => {
+        for (const item of this.askMenuKinds()) {
+          menu.addItem((mi) => mi.setTitle(`LPMS \uB2E8\uCD94 \u2014 ${item.label}`).setIcon(item.icon).onClick(() => this.askInsert(editor, item, view && view.file && view.file.path)));
+        }
+      }));
+    } catch (e) {
+      console.error("[sync] editor-menu", e);
+    }
     this.app.workspace.onLayoutReady(async () => {
       this.registerEvent(this.app.vault.on("modify", (f) => this.onLocal(f)));
       this.registerEvent(this.app.vault.on("create", (f) => this.onLocal(f)));
@@ -11118,6 +11134,8 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     if (fields && fields.unit) L.push("unit: " + fields.unit);
     if (fields && fields["\uCC44\uB110"]) L.push("\uCC44\uB110: " + fields["\uCC44\uB110"]);
     if (fields && fields["\uC885\uB958"]) L.push("\uC885\uB958: " + fields["\uC885\uB958"]);
+    if (fields && fields["\uD310"]) L.push("\uD310: " + fields["\uD310"]);
+    if (fields && fields.pr) L.push("pr: " + fields.pr);
     L.push("```");
     return L.join("\n") + "\n";
   }
@@ -11293,6 +11311,55 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       }
     }
     return this.askDodge(cv, { x: Math.round(c.x - w / 2), y: Math.round(c.y - h / 2), width: w, height: h });
+  }
+  /* ── 보통 노트(.md) 안에 단추를 «넣는» 길 (0.5.66, 2026-08-19 형 지시) ────────────────
+     형: 「본문 내에서도 버튼 구현을 해주면 좋겠는데 노트 본문 내에서도 그게 가능할까?」
+     ⭐ **그리는 것은 0.5.60 부터 이미 된다** — 노트에 ```lpms-ask``` 블록이 있으면 단추로 그려진다.
+        없던 것은 그 블록을 «놓는» 자리다. 판에는 아래 «카드 추가» 줄이 있지만 노트에는 그런 줄이
+        없다 → 명령(command)과 편집기 메뉴로 넣는다. 종류는 판의 단추 넷과 같다(`askMenuKinds`).
+     ⭐ 노트에서는 «어느 판인가»가 요청에 안 실린다(`board=null`) — 그래서 넣을 때 `판:` 을 채운다.
+        머리말(`판:`·`PR:`)에서 먼저 찾고, 없으면 **경로**에서 찾는다: 판 노트는
+        `…/판/<판 이름>/….md` 에 산다(판 파일 `…/판/<판 이름>.canvas` 와 같은 이름의 폴더).
+     ⛔ 못 찾으면 «빈 `판:`» 을 적지 않는다 — 값이 없는 설정 줄은 설정으로 안 읽혀 **물음 글로 샌다**
+        (`ASK_FIELD_OK`). 그럴 때는 그냥 빼고, 무엇을 적어야 하는지 알린다. */
+  askNoteSeed(text2, path) {
+    const out = {};
+    const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(String(text2 || ""));
+    if (m) {
+      for (const line of m[1].split("\n")) {
+        const f = /^\s*([^\s:]+)\s*:\s*(.*)$/.exec(line);
+        if (!f) continue;
+        const k = f[1].trim().toLowerCase(), v = f[2].trim().replace(/^["']|["']$/g, "");
+        if (k === "\uD310" && v) out["\uD310"] = v;
+        if (k === "pr" && /^\d+$/.test(v)) out.pr = v;
+      }
+    }
+    if (!out["\uD310"] && path) {
+      const seg = nfc(String(path)).split("/");
+      const i = seg.lastIndexOf("\uD310");
+      if (i >= 0 && seg.length > i + 2) out["\uD310"] = seg[i + 1];
+    }
+    return out;
+  }
+  // 커서 자리에 그 종류의 블록을 넣는다. 넣기만 하고 아무것도 안 보낸다 — 보내는 것은 형이 단추를 누를 때다.
+  askInsert(editor, item, path) {
+    if (!editor || typeof editor.replaceSelection !== "function") return null;
+    let all2 = "";
+    try {
+      all2 = editor.getValue ? editor.getValue() : "";
+    } catch (e) {
+    }
+    const seed = this.askNoteSeed(all2, path);
+    const fields = {};
+    if (item.kind2) fields["\uC885\uB958"] = item.kind2;
+    if (seed["\uD310"]) fields["\uD310"] = seed["\uD310"];
+    if (item.kind2 === "\uBA38\uC9C0" && seed.pr) fields.pr = seed.pr;
+    const text2 = this.askNewCardText(fields, item.kind);
+    editor.replaceSelection(text2);
+    if (!seed["\uD310"] && (item.kind === "run" || item.kind2 === "\uBA38\uC9C0")) {
+      new import_obsidian.Notice(`\u26A0\uFE0F \uC774 \uB178\uD2B8\uC5D0\uC11C \xAB\uC5B4\uB290 \uD310\xBB\uC778\uC9C0\uB97C \uBABB \uCC3E\uC558\uC2B5\uB2C8\uB2E4 \u2014 \uBE14\uB85D\uC5D0 \xAB\uD310: EXP-0NN \u2014 \u2026\xBB \uD55C \uC904\uC744 \uC801\uC5B4 \uC8FC\uC2ED\uC2DC\uC624`, 9e3);
+    }
+    return text2;
   }
   // 줄에 놓을 단추들 — 왼쪽부터 이 차례로 그린다. 종류가 늘면 여기 한 줄만 는다.
   //  `icon` 은 옵시디언(lucide) 아이콘 이름이다. 그 이름이 없는 판에서는 못 그리는데,
