@@ -10421,6 +10421,17 @@ var ASK_FIELD_OK = {
 var BIN_EXT = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", svg: "image/svg+xml" };
 var BIN_MAX = 2 * 1024 * 1024;
 var nfc = (s) => s.normalize("NFC");
+var CANVAS_SEEN_MAX = 12;
+function fnv1a(s, seed) {
+  let h = seed >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h = Math.imul(h ^ c & 255, 16777619) >>> 0;
+    h = Math.imul(h ^ c >>> 8, 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+var seenKey = (s) => `${s.length}:${fnv1a(s, 2166136261)}:${fnv1a(s, 40389)}`;
 function md5b64(u8) {
   const S = [
     7,
@@ -11600,6 +11611,42 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       return { ok: false, msg: "\uC811\uC18D \uBD88\uAC00 \u2014 URL/\uB124\uD2B8\uC6CC\uD06C \uD655\uC778" };
     }
   }
+  /* ── 판이 «옛 판본으로 되돌아 쓰는» 것을 올리지 않는다 (0.5.65, 2026-08-19 형 신고) ────────
+     ⛔ 무슨 일이 있었나 (판 EXP-016·017·018, 아이패드, 진단 레코드 셋이 그대로 가리켰다):
+        ① 서버가 «🖥 지금 클러스터» 카드를 값이 바뀔 때마다 다시 적었다 — 그날은 데몬이 멎어
+           «⚠️ N분째 안 갱신» 이 **1분마다** 늘어 판이 1분마다 새로 올라왔다.
+        ② 아이패드는 그 판 셋을 **탭으로 열어 둔 채** 앱이 뒤로 물러나 있었다. 플러그인은
+           올라오는 판본을 파일에 계속 썼지만, **화면(캔버스 뷰)의 메모리 판은 그대로**였다.
+        ③ 앱이 다시 앞으로 나오자 옵시디언이 그 셋을 **메모리의 옛 판으로 저장**했다
+           (`modify` 셋이 0.3초 안에 몰려 왔다 — 파일 셋의 수정시각이 그 증거다).
+        ④ 플러그인은 그것을 «형이 고친 것» 으로 읽어 5분 지난 판본을 서버에 밀어 넣었고
+           (실제로 rev48 이 그렇게 올라갔다), base·local·server 셋이 갈려 사본이 났다.
+     ⭐ 고침: **로컬 판이 «우리가 이미 지나온 서버 판본» 으로 되돌아가 있으면 올리지 않는다.**
+        판마다 지나온 판본의 지문을 CANVAS_SEEN_MAX 개 들고 있다가, 지금 파일이 그 중
+        **기준선보다 앞선** 자리의 것이면 형의 편집이 아니라 «되돌아 쓴 것»으로 본다.
+        올리는 대신 파일을 기준선으로 되돌리고 열린 판을 갈아 끼운다.
+     ⛔ 새로 적은 글은 여기 안 걸린다 — 서버에 **있었던 적이 없는** 내용이라 지문이 없다.
+        (되돌리기로 옛 서버 판본에 정확히 되돌아가면 걸리는데, 그때는 그 판이 열린 판이라
+         「서버본으로 맞춘다」는 지금 규칙과 결론이 같다.) */
+  canvasSeen(p, content) {
+    if (!this._seen) this._seen = /* @__PURE__ */ new Map();
+    const k = seenKey(content || "");
+    const ring = this._seen.get(p) || [];
+    if (ring[ring.length - 1] === k) return;
+    ring.push(k);
+    while (ring.length > CANVAS_SEEN_MAX) ring.shift();
+    this._seen.set(p, ring);
+    if (this._seen.size > 40) this._seen.delete(this._seen.keys().next().value);
+  }
+  // 지금 파일이 «기준선보다 앞선» 서버 판본인가 — 그러면 형의 편집이 아니라 되돌아 쓴 것이다.
+  canvasStale(p, content) {
+    const ring = this._seen && this._seen.get(p);
+    const base = this.shadow.get(p);
+    if (!ring || base === void 0) return false;
+    const i = ring.indexOf(seenKey(content || ""));
+    const cur = ring.indexOf(seenKey(base));
+    return i >= 0 && cur >= 0 && i < cur;
+  }
   async onLocal(file) {
     if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured() || !file || this._ignored(file.path)) return;
     const p = nfc(file.path);
@@ -11621,6 +11668,14 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         return;
       }
       if (this.shadow.get(p) === content) return;
+      if (this.isCanvasPath(p) && this.canvasStale(p, content)) {
+        const base = this.shadow.get(p);
+        await this.logConflict(p, "canvas-stale", base, content, base, file.stat && file.stat.mtime || Date.now(), 0, null, null);
+        await this.writeLocal(p, base);
+        if (this.canvasOpen(p)) await this.reloadCanvas(p);
+        new import_obsidian.Notice(`\u26A0\uFE0F \uC5F4\uC5B4 \uB454 \uD310\uC774 \uC61B \uD310\uBCF8\uC73C\uB85C \uB418\uB3CC\uC544\uAC00 \uC788\uC5C8\uC2B5\uB2C8\uB2E4 \u2014 \uC9C0\uAE08 \uAC83\uC73C\uB85C \uB9DE\uCDC4\uC2B5\uB2C8\uB2E4: ${p.split("/").pop()}`, 8e3);
+        return;
+      }
       await this.upsert(p, content, file.stat && file.stat.mtime || Date.now());
     });
   }
@@ -11988,6 +12043,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   async applyRemoteInner(doc2) {
     const p = this.docPath(doc2);
     if (this._ignored(p)) return false;
+    if (this.isCanvasPath(p) && !doc2.deleted && !doc2._deleted && doc2.content !== void 0) this.canvasSeen(nfc(p), doc2.content || "");
     if (this.isBinPath(p)) return this.applyRemoteBin(doc2, p);
     if (!this.isTextPath(p)) return false;
     if (nfc(p) === this.collabPath) return false;

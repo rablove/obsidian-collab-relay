@@ -71,6 +71,19 @@ const ASK_FIELD_OK = { unit: (v) => /^\d+\.\d+$/.test(v),
 const BIN_EXT = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', svg: 'image/svg+xml' };
 const BIN_MAX = 2 * 1024 * 1024;   // 파일 하나 상한. 넘으면 «조용히» 넘기지 않고 콘솔+알림에 남긴다.
 const nfc = (s) => s.normalize('NFC');
+/* 판(캔버스)마다 «서버에 있었던 판본» 을 몇 개 기억해 둔다 (0.5.65). 내용은 한 판이 30KB 가 넘어
+   기기에 들고 있을 수 없으므로 **지문만** 둔다 — 길이 + 서로 다른 씨앗의 FNV-1a 둘. */
+const CANVAS_SEEN_MAX = 12;
+function fnv1a(s, seed) {
+  let h = seed >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h = Math.imul(h ^ (c & 255), 16777619) >>> 0;
+    h = Math.imul(h ^ (c >>> 8), 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+const seenKey = (s) => `${s.length}:${fnv1a(s, 2166136261)}:${fnv1a(s, 40389)}`;
 // CouchDB 첨부의 digest 는 md5 다. 로컬 바이트와 그걸 견주려면 md5 가 필요한데
 // crypto.subtle 은 SHA 만 준다. 이 비교가 서야 «같으면 아무것도 안 한다»가 성립하고,
 // 그래야 받아 쓴 그림을 곧바로 되올리는 되풀이가 안 생긴다(받아 쓰면 로컬 mtime 이 늘 «지금»이라
@@ -897,6 +910,42 @@ export default class VaultSyncCollab extends Plugin {
     } catch (e) { return { ok: false, msg: '접속 불가 — URL/네트워크 확인' }; }
   }
 
+  /* ── 판이 «옛 판본으로 되돌아 쓰는» 것을 올리지 않는다 (0.5.65, 2026-08-19 형 신고) ────────
+     ⛔ 무슨 일이 있었나 (판 EXP-016·017·018, 아이패드, 진단 레코드 셋이 그대로 가리켰다):
+        ① 서버가 «🖥 지금 클러스터» 카드를 값이 바뀔 때마다 다시 적었다 — 그날은 데몬이 멎어
+           «⚠️ N분째 안 갱신» 이 **1분마다** 늘어 판이 1분마다 새로 올라왔다.
+        ② 아이패드는 그 판 셋을 **탭으로 열어 둔 채** 앱이 뒤로 물러나 있었다. 플러그인은
+           올라오는 판본을 파일에 계속 썼지만, **화면(캔버스 뷰)의 메모리 판은 그대로**였다.
+        ③ 앱이 다시 앞으로 나오자 옵시디언이 그 셋을 **메모리의 옛 판으로 저장**했다
+           (`modify` 셋이 0.3초 안에 몰려 왔다 — 파일 셋의 수정시각이 그 증거다).
+        ④ 플러그인은 그것을 «형이 고친 것» 으로 읽어 5분 지난 판본을 서버에 밀어 넣었고
+           (실제로 rev48 이 그렇게 올라갔다), base·local·server 셋이 갈려 사본이 났다.
+     ⭐ 고침: **로컬 판이 «우리가 이미 지나온 서버 판본» 으로 되돌아가 있으면 올리지 않는다.**
+        판마다 지나온 판본의 지문을 CANVAS_SEEN_MAX 개 들고 있다가, 지금 파일이 그 중
+        **기준선보다 앞선** 자리의 것이면 형의 편집이 아니라 «되돌아 쓴 것»으로 본다.
+        올리는 대신 파일을 기준선으로 되돌리고 열린 판을 갈아 끼운다.
+     ⛔ 새로 적은 글은 여기 안 걸린다 — 서버에 **있었던 적이 없는** 내용이라 지문이 없다.
+        (되돌리기로 옛 서버 판본에 정확히 되돌아가면 걸리는데, 그때는 그 판이 열린 판이라
+         「서버본으로 맞춘다」는 지금 규칙과 결론이 같다.) */
+  canvasSeen(p, content) {
+    if (!this._seen) this._seen = new Map();
+    const k = seenKey(content || '');
+    const ring = this._seen.get(p) || [];
+    if (ring[ring.length - 1] === k) return;   // 같은 판본이 잇달아 와도 자리를 안 먹는다
+    ring.push(k);
+    while (ring.length > CANVAS_SEEN_MAX) ring.shift();
+    this._seen.set(p, ring);
+    if (this._seen.size > 40) this._seen.delete(this._seen.keys().next().value);   // 오래된 판부터 잊는다
+  }
+  // 지금 파일이 «기준선보다 앞선» 서버 판본인가 — 그러면 형의 편집이 아니라 되돌아 쓴 것이다.
+  canvasStale(p, content) {
+    const ring = this._seen && this._seen.get(p);
+    const base = this.shadow.get(p);
+    if (!ring || base === undefined) return false;
+    const i = ring.indexOf(seenKey(content || ''));
+    const cur = ring.indexOf(seenKey(base));
+    return i >= 0 && cur >= 0 && i < cur;
+  }
   async onLocal(file) {
     if (this.applying || this._dupName || Date.now() < (this._suppressUntil || 0) || !this.configured() || !file || this._ignored(file.path)) return;
     const p = nfc(file.path);
@@ -908,6 +957,15 @@ export default class VaultSyncCollab extends Plugin {
       if (this.applying || Date.now() < (this._suppressUntil || 0)) return;   // 줄에서 기다리는 사이에 받는 쪽이 시작됐으면 비킨다
       let content; try { content = await this.app.vault.adapter.read(file.path); } catch (e) { return; }
       if (this.shadow.get(p) === content) return;   // 앞의 것이 이미 이 판본을 올렸다 — 끌기 한 번에 여러 번 오는 것이 여기서 합쳐진다
+      // ⭐ 판이 옛 판본으로 되돌아 쓰였으면 올리지 않고 되돌린다 (0.5.65 — canvasSeen 곁 주석)
+      if (this.isCanvasPath(p) && this.canvasStale(p, content)) {
+        const base = this.shadow.get(p);
+        await this.logConflict(p, 'canvas-stale', base, content, base, (file.stat && file.stat.mtime) || Date.now(), 0, null, null);
+        await this.writeLocal(p, base);
+        if (this.canvasOpen(p)) await this.reloadCanvas(p);
+        new Notice(`⚠️ 열어 둔 판이 옛 판본으로 되돌아가 있었습니다 — 지금 것으로 맞췄습니다: ${p.split('/').pop()}`, 8000);
+        return;
+      }
       await this.upsert(p, content, (file.stat && file.stat.mtime) || Date.now());
     });
   }
@@ -1138,6 +1196,9 @@ export default class VaultSyncCollab extends Plugin {
   async applyRemoteInner(doc) {
     const p = this.docPath(doc);
     if (this._ignored(p)) return false;
+    // ⭐ 판이면 «서버에 있었던 판본» 으로 적어 둔다 — 뒤에 파일이 이리로 되돌아가 있으면 그것은
+    //    형의 편집이 아니라 열어 둔 판이 되돌아 쓴 것이다 (canvasSeen 곁 주석).
+    if (this.isCanvasPath(p) && !doc.deleted && !doc._deleted && doc.content !== undefined) this.canvasSeen(nfc(p), doc.content || '');
     if (this.isBinPath(p)) return this.applyRemoteBin(doc, p);   // 그림 — 첨부(bin)를 따로 받아 통째로
     if (!this.isTextPath(p)) return false;
     if (nfc(p) === this.collabPath) return false;   // 협업 중인 노트 → relay(Yjs)가 소유, 건드리지 않음
