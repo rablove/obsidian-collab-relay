@@ -10663,6 +10663,7 @@ body.collab-canvassync-open .modal-close-button { display: none !important; }
 .lpms-ask-btn:hover:not(:disabled) { background: var(--interactive-accent-hover); }
 .lpms-ask-btn:disabled { opacity: .5; cursor: default; }
 .lpms-ask-run .lpms-ask-btn { background: var(--color-red, #d64545); border-color: var(--color-red, #d64545); }
+.lpms-ask-gpt .lpms-ask-btn { background: var(--color-green, #3a9e5c); border-color: var(--color-green, #3a9e5c); }
 .lpms-ask-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .lpms-ask-ch { padding: 4px 8px; border-radius: 6px; font-size: 13px; }
 .lpms-ask-note { font-size: 12px; color: var(--text-muted); }
@@ -10676,6 +10677,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   async onload() {
     this.registerMarkdownCodeBlockProcessor("lpms-ask", (src, el, ctx) => this.renderAskBlock(src, el, ctx, "ask"));
     this.registerMarkdownCodeBlockProcessor("lpms-run", (src, el, ctx) => this.renderAskBlock(src, el, ctx, "run"));
+    this.registerMarkdownCodeBlockProcessor("lpms-ask-gpt", (src, el, ctx) => this.renderAskBlock(src, el, ctx, "gpt"));
     await this.loadSettings();
     if (!this.settings.deviceId) {
       this.settings.deviceId = "dev-" + Math.random().toString(36).slice(2, 7);
@@ -10991,7 +10993,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
      그래서 노트에서는 **블록 «안»에 적은 것이 물음**이다 (카드는 카드 글이 물음 — 예전 그대로).
      `src` 는 옵시디언이 준 블록 속 원본이라 DOM 도 ctx 도 안 탄다. */
   askBlockRaw(src, kind) {
-    return "```lpms-" + (kind === "run" ? "run" : "ask") + "\n" + String(src == null ? "" : src) + "\n```";
+    return "```lpms-" + (kind === "run" ? "run" : kind === "gpt" ? "ask-gpt" : "ask") + "\n" + String(src == null ? "" : src) + "\n```";
   }
   // 버튼이 놓인 «그 카드»에 적힌 글을 읽는다. 두 길을 차례로 본다.
   askCardText(el, ctx) {
@@ -11071,16 +11073,22 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     const seed = this.askSeedFields(fields, el, ctx);
     const unit = fields.unit || null;
     const inner = rest.trim();
-    const box = el.createDiv({ cls: "lpms-ask" + (kind === "run" ? " lpms-ask-run" : "") });
-    if (kind === "ask" && inner) box.createDiv({ cls: "lpms-ask-text", text: inner });
+    const box = el.createDiv({ cls: "lpms-ask" + (kind === "run" ? " lpms-ask-run" : kind === "gpt" ? " lpms-ask-gpt" : "") });
+    if (kind !== "run" && inner) box.createDiv({ cls: "lpms-ask-text", text: inner });
     const row = box.createDiv({ cls: "lpms-ask-row" });
-    const btn = row.createEl("button", { cls: "lpms-ask-btn", text: kind === "run" ? "\uB3CC\uB9AC\uAE30" : "\uBCF4\uB0B4\uAE30" });
-    const sel = row.createEl("select", { cls: "lpms-ask-ch" });
-    for (const [v, t] of [["\uC5EC\uAE30", "\uC5EC\uAE30"], ["vega", "Vega"]]) {
-      const o = sel.createEl("option", { text: t });
-      o.value = v;
+    const btn = row.createEl("button", {
+      cls: "lpms-ask-btn",
+      text: kind === "run" ? "\uB3CC\uB9AC\uAE30" : kind === "gpt" ? "ChatGPT \uB85C \uBB3B\uAE30" : "\uBCF4\uB0B4\uAE30"
+    });
+    let sel = null;
+    if (kind !== "gpt") {
+      sel = row.createEl("select", { cls: "lpms-ask-ch" });
+      for (const [v, t] of [["\uC5EC\uAE30", "\uC5EC\uAE30"], ["vega", "Vega"]]) {
+        const o = sel.createEl("option", { text: t });
+        o.value = v;
+      }
+      sel.value = this.askChannelSeed(seed);
     }
-    sel.value = this.askChannelSeed(seed);
     const note = box.createDiv({ cls: "lpms-ask-note", text: "" });
     const drawnOnCanvas = this.askOnCanvas(el, ctx);
     btn.onclick = async () => {
@@ -11097,7 +11105,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         kind,
         text: text2,
         unit,
-        channel: sel.value,
+        channel: sel ? sel.value : null,
         kind2: seed["\uC885\uB958"],
         board2: seed["\uD310"],
         pr: seed.pr
@@ -11130,7 +11138,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   //  ⭐ `종류:` 도 함께 적는다 — 이게 있어야 「새 실험」 단추가 낸 카드가 새 실험으로 읽힌다.
   //     안 적으면 그냥 빈 물음이라, 눌렀을 때 「판을 만들어 달라」가 물음으로 도착한다.
   askNewCardText(fields, kind) {
-    const L = ["```lpms-" + (kind === "run" ? "run" : "ask")];
+    const L = ["```lpms-" + (kind === "run" ? "run" : kind === "gpt" ? "ask-gpt" : "ask")];
     if (fields && fields.unit) L.push("unit: " + fields.unit);
     if (fields && fields["\uCC44\uB110"]) L.push("\uCC44\uB110: " + fields["\uCC44\uB110"]);
     if (fields && fields["\uC885\uB958"]) L.push("\uC885\uB958: " + fields["\uC885\uB958"]);
@@ -11374,7 +11382,9 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       //    `종류: 머지` 만 보고 가린다(`canvas_watch` 의 `mergereq`). PR 번호는 안 적는다 —
       //    어느 PR 인지는 실험 대장(`ledger`)이 판으로 찾는다. 한 개만 머지하려면
       //    카드에 `pr: 84` 를 손으로 더한다.
-      { label: "PR \uBA38\uC9C0", icon: "git-merge", kind: "ask", kind2: "\uBA38\uC9C0" }
+      { label: "PR \uBA38\uC9C0", icon: "git-merge", kind: "ask", kind2: "\uBA38\uC9C0" },
+      // ⭐ ChatGPT 물음 (0.5.68) — 클로드를 안 깨우고 ChatGPT GUI 에만 묻는다.
+      { label: "ChatGPT \uBB3C\uC74C", icon: "message-circle", kind: "gpt", kind2: null }
     ];
   }
   async askMenuPlace(cv, item, evt) {
@@ -11450,7 +11460,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   }
   async sendCanvasAsk({ board, kind, text: text2, unit, channel, kind2, board2, pr }) {
     if (!this.configured()) return { ok: false, msg: "\u26D4 \uB85C\uADF8\uC778\uBD80\uD130 \uD558\uC2ED\uC2DC\uC624" };
-    if (kind === "ask" && !text2 && !kind2) return { ok: false, msg: "\u26D4 \uC774 \uCE74\uB4DC\uC5D0 \uBB3C\uC74C\uC744 \uC801\uACE0 \uB204\uB974\uC2ED\uC2DC\uC624" };
+    if ((kind === "ask" || kind === "gpt") && !text2 && !kind2) return { ok: false, msg: "\u26D4 \uC774 \uCE74\uB4DC\uC5D0 \uBB3C\uC74C\uC744 \uC801\uACE0 \uB204\uB974\uC2ED\uC2DC\uC624" };
     const now = Date.now();
     this._askSent = (this._askSent || []).filter((t) => now - t < 36e5);
     if (this._askSent.length >= ASK_MAX_PER_HOUR) return { ok: false, msg: `\u26D4 \uD55C \uC2DC\uAC04 \uC0C1\uD55C(${ASK_MAX_PER_HOUR}\uAC74)\uC5D0 \uAC78\uB838\uC2B5\uB2C8\uB2E4` };
@@ -11476,7 +11486,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       });
       if (res.status === 200 || res.status === 201) {
         this._askSent.push(now);
-        new import_obsidian.Notice(kind === "run" ? "\uB3CC\uB9AC\uAE30 \uC694\uCCAD\uC744 \uC62C\uB838\uC2B5\uB2C8\uB2E4" : "\uBB3C\uC74C\uC744 \uC62C\uB838\uC2B5\uB2C8\uB2E4");
+        new import_obsidian.Notice(kind === "run" ? "\uB3CC\uB9AC\uAE30 \uC694\uCCAD\uC744 \uC62C\uB838\uC2B5\uB2C8\uB2E4" : kind === "gpt" ? "ChatGPT \uC5D0 \uBB3C\uC74C\uC744 \uC62C\uB838\uC2B5\uB2C8\uB2E4 (\uD074\uB85C\uB4DC\uB294 \uC548 \uB739\uB2C8\uB2E4)" : "\uBB3C\uC74C\uC744 \uC62C\uB838\uC2B5\uB2C8\uB2E4");
         const d = new Date(now), z = (n) => String(n).padStart(2, "0");
         return { ok: true, msg: `\u2705 \uC62C\uB838\uC2B5\uB2C8\uB2E4 ${z(d.getHours())}:${z(d.getMinutes())}` };
       }

@@ -176,7 +176,6 @@ body.collab-canvassync-open .modal-close-button { display: none !important; }
 .lpms-ask-btn:hover:not(:disabled) { background: var(--interactive-accent-hover); }
 .lpms-ask-btn:disabled { opacity: .5; cursor: default; }
 .lpms-ask-run .lpms-ask-btn { background: var(--color-red, #d64545); border-color: var(--color-red, #d64545); }
-.lpms-ask-gpt .lpms-ask-btn { background: var(--color-green, #3a9e5c); border-color: var(--color-green, #3a9e5c); }
 .lpms-ask-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .lpms-ask-ch { padding: 4px 8px; border-radius: 6px; font-size: 13px; }
 .lpms-ask-note { font-size: 12px; color: var(--text-muted); }
@@ -195,9 +194,6 @@ export default class VaultSyncCollab extends Plugin {
     //    캔버스 카드·보통 노트의 ```lpms-ask / ```lpms-run 을 진짜 버튼으로 그린다.
     this.registerMarkdownCodeBlockProcessor('lpms-ask', (src, el, ctx) => this.renderAskBlock(src, el, ctx, 'ask'));
     this.registerMarkdownCodeBlockProcessor('lpms-run', (src, el, ctx) => this.renderAskBlock(src, el, ctx, 'run'));
-    // ⭐ ChatGPT 단추 (0.5.68, ops 채널 요청 2026-08-21) — 이 길은 **클로드 세션을 안 깨운다.**
-    //    서버(`canvas_watch`)가 채널에 올리지 않고 `gptask.py` 로 직접 묻고 답 카드만 얹는다.
-    this.registerMarkdownCodeBlockProcessor('lpms-ask-gpt', (src, el, ctx) => this.renderAskBlock(src, el, ctx, 'gpt'));
     await this.loadSettings();
     if (!this.settings.deviceId) { this.settings.deviceId = 'dev-' + Math.random().toString(36).slice(2, 7); await this.saveSettings(); }
     if (!this.settings.deviceLabel) { this.settings.deviceLabel = 'dev-' + Math.random().toString(36).slice(2, 5); await this.saveSettings(); }
@@ -420,7 +416,7 @@ export default class VaultSyncCollab extends Plugin {
      그래서 노트에서는 **블록 «안»에 적은 것이 물음**이다 (카드는 카드 글이 물음 — 예전 그대로).
      `src` 는 옵시디언이 준 블록 속 원본이라 DOM 도 ctx 도 안 탄다. */
   askBlockRaw(src, kind) {
-    return '```lpms-' + (kind === 'run' ? 'run' : kind === 'gpt' ? 'ask-gpt' : 'ask') + '\n' + String(src == null ? '' : src) + '\n```';
+    return '```lpms-' + (kind === 'run' ? 'run' : 'ask') + '\n' + String(src == null ? '' : src) + '\n```';
   }
   // 버튼이 놓인 «그 카드»에 적힌 글을 읽는다. 두 길을 차례로 본다.
   askCardText(el, ctx) {
@@ -493,23 +489,18 @@ export default class VaultSyncCollab extends Plugin {
     const seed = this.askSeedFields(fields, el, ctx);
     const unit = fields.unit || null;
     const inner = rest.trim();   // 블록 «안»에 적은 글(있으면 이긴다)
-    const box = el.createDiv({ cls: 'lpms-ask' + (kind === 'run' ? ' lpms-ask-run' : kind === 'gpt' ? ' lpms-ask-gpt' : '') });
-    if (kind !== 'run' && inner) box.createDiv({ cls: 'lpms-ask-text', text: inner });
+    const box = el.createDiv({ cls: 'lpms-ask' + (kind === 'run' ? ' lpms-ask-run' : '') });
+    if (kind === 'ask' && inner) box.createDiv({ cls: 'lpms-ask-text', text: inner });
     const row = box.createDiv({ cls: 'lpms-ask-row' });
-    const btn = row.createEl('button', { cls: 'lpms-ask-btn',
-      text: kind === 'run' ? '돌리기' : kind === 'gpt' ? 'ChatGPT 로 묻기' : '보내기' });
+    const btn = row.createEl('button', { cls: 'lpms-ask-btn', text: kind === 'run' ? '돌리기' : '보내기' });
     // 어느 채널로 보낼까 — **늘 그린다**(물음·돌리기 둘 다, 형 지시 2026-08-15).
     // 돌리기에도 붙는 까닭: 쌍둥이 채널(#code ↔ #code-selim)은 계정이 달라 한도를 나눠 쓰는 자리라
     // 「이 스윕은 저쪽 계정에서 돌려라」가 뜻이 있다.
-    // ⛔ ChatGPT 단추에는 안 붙인다 — 그 길은 마터모스트 채널을 안 거쳐 고를 것이 없다.
-    let sel = null;
-    if (kind !== 'gpt') {
-      sel = row.createEl('select', { cls: 'lpms-ask-ch' });
-      for (const [v, t] of [['여기', '여기'], ['vega', 'Vega']]) {
-        const o = sel.createEl('option', { text: t }); o.value = v;
-      }
-      sel.value = this.askChannelSeed(seed);
+    const sel = row.createEl('select', { cls: 'lpms-ask-ch' });
+    for (const [v, t] of [['여기', '여기'], ['vega', 'Vega']]) {
+      const o = sel.createEl('option', { text: t }); o.value = v;
     }
+    sel.value = this.askChannelSeed(seed);
     // 빈칸으로 둔다 — 누른 뒤 «올리는 중…»·«✅ 올렸습니다»·«⛔ …» 가 여기로 나온다(상태 표시줄).
     const note = box.createDiv({ cls: 'lpms-ask-note', text: '' });
     // 판 위인가 보통 노트인가 — 보낼 것이 다르다.
@@ -535,7 +526,7 @@ export default class VaultSyncCollab extends Plugin {
       const said = inner || seed['종류'] || seed['판'] || seed.pr;
       const text = onCanvas ? (inner || this.askCardText(el, ctx))
                             : (said ? this.askBlockRaw(src, kind) : '');
-      const r = await this.sendCanvasAsk({ board, kind, text, unit, channel: sel ? sel.value : null,
+      const r = await this.sendCanvasAsk({ board, kind, text, unit, channel: sel.value,
         kind2: seed['종류'], board2: seed['판'], pr: seed.pr });
       note.setText(r.msg);
       if (!r.ok) { btn.disabled = false; return; }
@@ -557,7 +548,7 @@ export default class VaultSyncCollab extends Plugin {
   //  ⭐ `종류:` 도 함께 적는다 — 이게 있어야 「새 실험」 단추가 낸 카드가 새 실험으로 읽힌다.
   //     안 적으면 그냥 빈 물음이라, 눌렀을 때 「판을 만들어 달라」가 물음으로 도착한다.
   askNewCardText(fields, kind) {
-    const L = ['```lpms-' + (kind === 'run' ? 'run' : kind === 'gpt' ? 'ask-gpt' : 'ask')];
+    const L = ['```lpms-' + (kind === 'run' ? 'run' : 'ask')];
     if (fields && fields.unit) L.push('unit: ' + fields.unit);
     if (fields && fields['채널']) L.push('채널: ' + fields['채널']);
     if (fields && fields['종류']) L.push('종류: ' + fields['종류']);
@@ -760,9 +751,7 @@ export default class VaultSyncCollab extends Plugin {
             //    `종류: 머지` 만 보고 가린다(`canvas_watch` 의 `mergereq`). PR 번호는 안 적는다 —
             //    어느 PR 인지는 실험 대장(`ledger`)이 판으로 찾는다. 한 개만 머지하려면
             //    카드에 `pr: 84` 를 손으로 더한다.
-            { label: 'PR 머지', icon: 'git-merge', kind: 'ask', kind2: '머지' },
-            // ⭐ ChatGPT 물음 (0.5.68) — 클로드를 안 깨우고 ChatGPT GUI 에만 묻는다.
-            { label: 'ChatGPT 물음', icon: 'message-circle', kind: 'gpt', kind2: null }];
+            { label: 'PR 머지', icon: 'git-merge', kind: 'ask', kind2: '머지' }];
   }
   async askMenuPlace(cv, item, evt) {
     const fields = item.kind2 ? { '종류': item.kind2 } : {};
@@ -819,7 +808,7 @@ export default class VaultSyncCollab extends Plugin {
     //    나온 카드(제목을 안 베끼므로 글이 아예 없다)가 여기서 조용히 멈춘다.
     //    서버 `canvas_watch.button_request` 도 `if not text and not newexp:` 로 같은 짝을 본다.
     //    ⛔ `종류` 없는 빈 물음은 그대로 버린다 — 여기가 느슨해지면 빈 세션이 뜬다.
-    if ((kind === 'ask' || kind === 'gpt') && !text && !kind2) return { ok: false, msg: '⛔ 이 카드에 물음을 적고 누르십시오' };
+    if (kind === 'ask' && !text && !kind2) return { ok: false, msg: '⛔ 이 카드에 물음을 적고 누르십시오' };
     const now = Date.now();
     this._askSent = (this._askSent || []).filter((t) => now - t < 3600000);
     if (this._askSent.length >= ASK_MAX_PER_HOUR) return { ok: false, msg: `⛔ 한 시간 상한(${ASK_MAX_PER_HOUR}건)에 걸렸습니다` };
@@ -848,8 +837,7 @@ export default class VaultSyncCollab extends Plugin {
         mtime: now, deleted: false, clientVersion: this.manifest.version, content: JSON.stringify(rec), rec });
       if (res.status === 200 || res.status === 201) {
         this._askSent.push(now);
-        new Notice(kind === 'run' ? '돌리기 요청을 올렸습니다'
-                   : kind === 'gpt' ? 'ChatGPT 에 물음을 올렸습니다 (클로드는 안 뜹니다)' : '물음을 올렸습니다');
+        new Notice(kind === 'run' ? '돌리기 요청을 올렸습니다' : '물음을 올렸습니다');
         const d = new Date(now), z = (n) => String(n).padStart(2, '0');
         return { ok: true, msg: `✅ 올렸습니다 ${z(d.getHours())}:${z(d.getMinutes())}` };
       }
