@@ -55,6 +55,14 @@ const ASK_CHANNELS = { '': '여기', '여기': '여기', 'code': '여기', '기�
 const ASK_KINDS = { '새실험': 1, '새 실험': 1, 'newexp': 1,
   '머지': 1, 'merge': 1, 'PR머지': 1, 'PR 머지': 1 };
 const ASK_NEW_COLOR = '4';   // 새 실험 카드는 초록으로 — 흰 카드면 판에서 안 갈린다
+// 종류마다 다른 것 셋 — 코드블록 이름 · 단추 글자 · 올린 뒤 알림. 종류가 늘면 여기 한 줄씩만 는다.
+//  ⭐ `look` = «확인용 요청» (0.5.69, ops 채널 요청 2026-08-21). 판의 값을 하나도 안 바꾸는 요청
+//     (「이 중간 결과를 그림으로 보여 달라」)이라 `ask` 와 갈라 둔다 — 받는 쪽이 **블록 이름만 보고**
+//     ☑️ 확인 카드 재체크를 걸지 말지 정할 수 있어야 한다. 보내는 구조는 `ask` 와 똑같고 `kind` 만 다르다.
+const ASK_BLOCK = { ask: 'lpms-ask', run: 'lpms-run', gpt: 'lpms-ask-gpt', look: 'lpms-look' };
+const ASK_BTN = { ask: '보내기', run: '돌리기', gpt: 'ChatGPT 로 묻기', look: '확인용 보내기' };
+const ASK_SENT = { ask: '물음을 올렸습니다', run: '돌리기 요청을 올렸습니다',
+  gpt: 'ChatGPT 에 물음을 올렸습니다 (클로드는 안 뜹니다)', look: '확인용 요청을 올렸습니다' };
 // ⛔ 값까지 봐야 설정이다. 이름만 보면 형이 적은 「채널: 이 얘기는 어디서 하죠?」 가 설정으로 먹혀 물음이 사라진다.
 const ASK_FIELD_OK = { unit: (v) => /^\d+\.\d+$/.test(v),
   '채널': (v) => Object.prototype.hasOwnProperty.call(ASK_CHANNELS, v.trim().toLowerCase()),
@@ -177,6 +185,7 @@ body.collab-canvassync-open .modal-close-button { display: none !important; }
 .lpms-ask-btn:disabled { opacity: .5; cursor: default; }
 .lpms-ask-run .lpms-ask-btn { background: var(--color-red, #d64545); border-color: var(--color-red, #d64545); }
 .lpms-ask-gpt .lpms-ask-btn { background: var(--color-green, #3a9e5c); border-color: var(--color-green, #3a9e5c); }
+.lpms-ask-look .lpms-ask-btn { background: var(--color-purple, #8b6ec4); border-color: var(--color-purple, #8b6ec4); }
 .lpms-ask-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .lpms-ask-ch { padding: 4px 8px; border-radius: 6px; font-size: 13px; }
 .lpms-ask-note { font-size: 12px; color: var(--text-muted); }
@@ -198,6 +207,9 @@ export default class VaultSyncCollab extends Plugin {
     // ⭐ ChatGPT 단추 (0.5.68, ops 채널 요청 2026-08-21) — 이 길은 **클로드 세션을 안 깨운다.**
     //    서버(`canvas_watch`)가 채널에 올리지 않고 `gptask.py` 로 직접 묻고 답 카드만 얹는다.
     this.registerMarkdownCodeBlockProcessor('lpms-ask-gpt', (src, el, ctx) => this.renderAskBlock(src, el, ctx, 'gpt'));
+    // ⭐ 확인용 요청 (0.5.69, ops 채널 요청 2026-08-21) — 「이 중간 결과를 그림으로 보여 달라」처럼
+    //    판의 값을 안 바꾸는 요청. 보내는 구조는 `lpms-ask` 와 같고 요청의 `kind` 만 `'look'` 이다.
+    this.registerMarkdownCodeBlockProcessor('lpms-look', (src, el, ctx) => this.renderAskBlock(src, el, ctx, 'look'));
     await this.loadSettings();
     if (!this.settings.deviceId) { this.settings.deviceId = 'dev-' + Math.random().toString(36).slice(2, 7); await this.saveSettings(); }
     if (!this.settings.deviceLabel) { this.settings.deviceLabel = 'dev-' + Math.random().toString(36).slice(2, 5); await this.saveSettings(); }
@@ -420,7 +432,7 @@ export default class VaultSyncCollab extends Plugin {
      그래서 노트에서는 **블록 «안»에 적은 것이 물음**이다 (카드는 카드 글이 물음 — 예전 그대로).
      `src` 는 옵시디언이 준 블록 속 원본이라 DOM 도 ctx 도 안 탄다. */
   askBlockRaw(src, kind) {
-    return '```lpms-' + (kind === 'run' ? 'run' : kind === 'gpt' ? 'ask-gpt' : 'ask') + '\n' + String(src == null ? '' : src) + '\n```';
+    return '```' + (ASK_BLOCK[kind] || ASK_BLOCK.ask) + '\n' + String(src == null ? '' : src) + '\n```';
   }
   // 버튼이 놓인 «그 카드»에 적힌 글을 읽는다. 두 길을 차례로 본다.
   askCardText(el, ctx) {
@@ -493,11 +505,10 @@ export default class VaultSyncCollab extends Plugin {
     const seed = this.askSeedFields(fields, el, ctx);
     const unit = fields.unit || null;
     const inner = rest.trim();   // 블록 «안»에 적은 글(있으면 이긴다)
-    const box = el.createDiv({ cls: 'lpms-ask' + (kind === 'run' ? ' lpms-ask-run' : kind === 'gpt' ? ' lpms-ask-gpt' : '') });
+    const box = el.createDiv({ cls: 'lpms-ask' + (kind === 'ask' ? '' : ' lpms-ask-' + kind) });
     if (kind !== 'run' && inner) box.createDiv({ cls: 'lpms-ask-text', text: inner });
     const row = box.createDiv({ cls: 'lpms-ask-row' });
-    const btn = row.createEl('button', { cls: 'lpms-ask-btn',
-      text: kind === 'run' ? '돌리기' : kind === 'gpt' ? 'ChatGPT 로 묻기' : '보내기' });
+    const btn = row.createEl('button', { cls: 'lpms-ask-btn', text: ASK_BTN[kind] || ASK_BTN.ask });
     // 어느 채널로 보낼까 — **늘 그린다**(물음·돌리기 둘 다, 형 지시 2026-08-15).
     // 돌리기에도 붙는 까닭: 쌍둥이 채널(#code ↔ #code-selim)은 계정이 달라 한도를 나눠 쓰는 자리라
     // 「이 스윕은 저쪽 계정에서 돌려라」가 뜻이 있다.
@@ -557,7 +568,7 @@ export default class VaultSyncCollab extends Plugin {
   //  ⭐ `종류:` 도 함께 적는다 — 이게 있어야 「새 실험」 단추가 낸 카드가 새 실험으로 읽힌다.
   //     안 적으면 그냥 빈 물음이라, 눌렀을 때 「판을 만들어 달라」가 물음으로 도착한다.
   askNewCardText(fields, kind) {
-    const L = ['```lpms-' + (kind === 'run' ? 'run' : kind === 'gpt' ? 'ask-gpt' : 'ask')];
+    const L = ['```' + (ASK_BLOCK[kind] || ASK_BLOCK.ask)];
     if (fields && fields.unit) L.push('unit: ' + fields.unit);
     if (fields && fields['채널']) L.push('채널: ' + fields['채널']);
     if (fields && fields['종류']) L.push('종류: ' + fields['종류']);
@@ -762,7 +773,9 @@ export default class VaultSyncCollab extends Plugin {
             //    카드에 `pr: 84` 를 손으로 더한다.
             { label: 'PR 머지', icon: 'git-merge', kind: 'ask', kind2: '머지' },
             // ⭐ ChatGPT 물음 (0.5.68) — 클로드를 안 깨우고 ChatGPT GUI 에만 묻는다.
-            { label: 'ChatGPT 물음', icon: 'message-circle', kind: 'gpt', kind2: null }];
+            { label: 'ChatGPT 물음', icon: 'message-circle', kind: 'gpt', kind2: null },
+            // ⭐ 확인용 (0.5.69) — 판의 값을 안 바꾸는 요청(그림·중간 결과 확인).
+            { label: '확인용', icon: 'eye', kind: 'look', kind2: null }];
   }
   async askMenuPlace(cv, item, evt) {
     const fields = item.kind2 ? { '종류': item.kind2 } : {};
@@ -819,7 +832,7 @@ export default class VaultSyncCollab extends Plugin {
     //    나온 카드(제목을 안 베끼므로 글이 아예 없다)가 여기서 조용히 멈춘다.
     //    서버 `canvas_watch.button_request` 도 `if not text and not newexp:` 로 같은 짝을 본다.
     //    ⛔ `종류` 없는 빈 물음은 그대로 버린다 — 여기가 느슨해지면 빈 세션이 뜬다.
-    if ((kind === 'ask' || kind === 'gpt') && !text && !kind2) return { ok: false, msg: '⛔ 이 카드에 물음을 적고 누르십시오' };
+    if (kind !== 'run' && !text && !kind2) return { ok: false, msg: '⛔ 이 카드에 물음을 적고 누르십시오' };
     const now = Date.now();
     this._askSent = (this._askSent || []).filter((t) => now - t < 3600000);
     if (this._askSent.length >= ASK_MAX_PER_HOUR) return { ok: false, msg: `⛔ 한 시간 상한(${ASK_MAX_PER_HOUR}건)에 걸렸습니다` };
@@ -848,8 +861,7 @@ export default class VaultSyncCollab extends Plugin {
         mtime: now, deleted: false, clientVersion: this.manifest.version, content: JSON.stringify(rec), rec });
       if (res.status === 200 || res.status === 201) {
         this._askSent.push(now);
-        new Notice(kind === 'run' ? '돌리기 요청을 올렸습니다'
-                   : kind === 'gpt' ? 'ChatGPT 에 물음을 올렸습니다 (클로드는 안 뜹니다)' : '물음을 올렸습니다');
+        new Notice(ASK_SENT[kind] || ASK_SENT.ask);
         const d = new Date(now), z = (n) => String(n).padStart(2, '0');
         return { ok: true, msg: `✅ 올렸습니다 ${z(d.getHours())}:${z(d.getMinutes())}` };
       }

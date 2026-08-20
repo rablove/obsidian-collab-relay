@@ -10411,6 +10411,14 @@ var ASK_KINDS = {
   "PR \uBA38\uC9C0": 1
 };
 var ASK_NEW_COLOR = "4";
+var ASK_BLOCK = { ask: "lpms-ask", run: "lpms-run", gpt: "lpms-ask-gpt", look: "lpms-look" };
+var ASK_BTN = { ask: "\uBCF4\uB0B4\uAE30", run: "\uB3CC\uB9AC\uAE30", gpt: "ChatGPT \uB85C \uBB3B\uAE30", look: "\uD655\uC778\uC6A9 \uBCF4\uB0B4\uAE30" };
+var ASK_SENT = {
+  ask: "\uBB3C\uC74C\uC744 \uC62C\uB838\uC2B5\uB2C8\uB2E4",
+  run: "\uB3CC\uB9AC\uAE30 \uC694\uCCAD\uC744 \uC62C\uB838\uC2B5\uB2C8\uB2E4",
+  gpt: "ChatGPT \uC5D0 \uBB3C\uC74C\uC744 \uC62C\uB838\uC2B5\uB2C8\uB2E4 (\uD074\uB85C\uB4DC\uB294 \uC548 \uB739\uB2C8\uB2E4)",
+  look: "\uD655\uC778\uC6A9 \uC694\uCCAD\uC744 \uC62C\uB838\uC2B5\uB2C8\uB2E4"
+};
 var ASK_FIELD_OK = {
   unit: (v) => /^\d+\.\d+$/.test(v),
   "\uCC44\uB110": (v) => Object.prototype.hasOwnProperty.call(ASK_CHANNELS, v.trim().toLowerCase()),
@@ -10664,6 +10672,7 @@ body.collab-canvassync-open .modal-close-button { display: none !important; }
 .lpms-ask-btn:disabled { opacity: .5; cursor: default; }
 .lpms-ask-run .lpms-ask-btn { background: var(--color-red, #d64545); border-color: var(--color-red, #d64545); }
 .lpms-ask-gpt .lpms-ask-btn { background: var(--color-green, #3a9e5c); border-color: var(--color-green, #3a9e5c); }
+.lpms-ask-look .lpms-ask-btn { background: var(--color-purple, #8b6ec4); border-color: var(--color-purple, #8b6ec4); }
 .lpms-ask-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .lpms-ask-ch { padding: 4px 8px; border-radius: 6px; font-size: 13px; }
 .lpms-ask-note { font-size: 12px; color: var(--text-muted); }
@@ -10678,6 +10687,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     this.registerMarkdownCodeBlockProcessor("lpms-ask", (src, el, ctx) => this.renderAskBlock(src, el, ctx, "ask"));
     this.registerMarkdownCodeBlockProcessor("lpms-run", (src, el, ctx) => this.renderAskBlock(src, el, ctx, "run"));
     this.registerMarkdownCodeBlockProcessor("lpms-ask-gpt", (src, el, ctx) => this.renderAskBlock(src, el, ctx, "gpt"));
+    this.registerMarkdownCodeBlockProcessor("lpms-look", (src, el, ctx) => this.renderAskBlock(src, el, ctx, "look"));
     await this.loadSettings();
     if (!this.settings.deviceId) {
       this.settings.deviceId = "dev-" + Math.random().toString(36).slice(2, 7);
@@ -10993,7 +11003,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
      그래서 노트에서는 **블록 «안»에 적은 것이 물음**이다 (카드는 카드 글이 물음 — 예전 그대로).
      `src` 는 옵시디언이 준 블록 속 원본이라 DOM 도 ctx 도 안 탄다. */
   askBlockRaw(src, kind) {
-    return "```lpms-" + (kind === "run" ? "run" : kind === "gpt" ? "ask-gpt" : "ask") + "\n" + String(src == null ? "" : src) + "\n```";
+    return "```" + (ASK_BLOCK[kind] || ASK_BLOCK.ask) + "\n" + String(src == null ? "" : src) + "\n```";
   }
   // 버튼이 놓인 «그 카드»에 적힌 글을 읽는다. 두 길을 차례로 본다.
   askCardText(el, ctx) {
@@ -11073,13 +11083,10 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     const seed = this.askSeedFields(fields, el, ctx);
     const unit = fields.unit || null;
     const inner = rest.trim();
-    const box = el.createDiv({ cls: "lpms-ask" + (kind === "run" ? " lpms-ask-run" : kind === "gpt" ? " lpms-ask-gpt" : "") });
+    const box = el.createDiv({ cls: "lpms-ask" + (kind === "ask" ? "" : " lpms-ask-" + kind) });
     if (kind !== "run" && inner) box.createDiv({ cls: "lpms-ask-text", text: inner });
     const row = box.createDiv({ cls: "lpms-ask-row" });
-    const btn = row.createEl("button", {
-      cls: "lpms-ask-btn",
-      text: kind === "run" ? "\uB3CC\uB9AC\uAE30" : kind === "gpt" ? "ChatGPT \uB85C \uBB3B\uAE30" : "\uBCF4\uB0B4\uAE30"
-    });
+    const btn = row.createEl("button", { cls: "lpms-ask-btn", text: ASK_BTN[kind] || ASK_BTN.ask });
     let sel = null;
     if (kind !== "gpt") {
       sel = row.createEl("select", { cls: "lpms-ask-ch" });
@@ -11138,7 +11145,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   //  ⭐ `종류:` 도 함께 적는다 — 이게 있어야 「새 실험」 단추가 낸 카드가 새 실험으로 읽힌다.
   //     안 적으면 그냥 빈 물음이라, 눌렀을 때 「판을 만들어 달라」가 물음으로 도착한다.
   askNewCardText(fields, kind) {
-    const L = ["```lpms-" + (kind === "run" ? "run" : kind === "gpt" ? "ask-gpt" : "ask")];
+    const L = ["```" + (ASK_BLOCK[kind] || ASK_BLOCK.ask)];
     if (fields && fields.unit) L.push("unit: " + fields.unit);
     if (fields && fields["\uCC44\uB110"]) L.push("\uCC44\uB110: " + fields["\uCC44\uB110"]);
     if (fields && fields["\uC885\uB958"]) L.push("\uC885\uB958: " + fields["\uC885\uB958"]);
@@ -11384,7 +11391,9 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       //    카드에 `pr: 84` 를 손으로 더한다.
       { label: "PR \uBA38\uC9C0", icon: "git-merge", kind: "ask", kind2: "\uBA38\uC9C0" },
       // ⭐ ChatGPT 물음 (0.5.68) — 클로드를 안 깨우고 ChatGPT GUI 에만 묻는다.
-      { label: "ChatGPT \uBB3C\uC74C", icon: "message-circle", kind: "gpt", kind2: null }
+      { label: "ChatGPT \uBB3C\uC74C", icon: "message-circle", kind: "gpt", kind2: null },
+      // ⭐ 확인용 (0.5.69) — 판의 값을 안 바꾸는 요청(그림·중간 결과 확인).
+      { label: "\uD655\uC778\uC6A9", icon: "eye", kind: "look", kind2: null }
     ];
   }
   async askMenuPlace(cv, item, evt) {
@@ -11460,7 +11469,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
   }
   async sendCanvasAsk({ board, kind, text: text2, unit, channel, kind2, board2, pr }) {
     if (!this.configured()) return { ok: false, msg: "\u26D4 \uB85C\uADF8\uC778\uBD80\uD130 \uD558\uC2ED\uC2DC\uC624" };
-    if ((kind === "ask" || kind === "gpt") && !text2 && !kind2) return { ok: false, msg: "\u26D4 \uC774 \uCE74\uB4DC\uC5D0 \uBB3C\uC74C\uC744 \uC801\uACE0 \uB204\uB974\uC2ED\uC2DC\uC624" };
+    if (kind !== "run" && !text2 && !kind2) return { ok: false, msg: "\u26D4 \uC774 \uCE74\uB4DC\uC5D0 \uBB3C\uC74C\uC744 \uC801\uACE0 \uB204\uB974\uC2ED\uC2DC\uC624" };
     const now = Date.now();
     this._askSent = (this._askSent || []).filter((t) => now - t < 36e5);
     if (this._askSent.length >= ASK_MAX_PER_HOUR) return { ok: false, msg: `\u26D4 \uD55C \uC2DC\uAC04 \uC0C1\uD55C(${ASK_MAX_PER_HOUR}\uAC74)\uC5D0 \uAC78\uB838\uC2B5\uB2C8\uB2E4` };
@@ -11486,7 +11495,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       });
       if (res.status === 200 || res.status === 201) {
         this._askSent.push(now);
-        new import_obsidian.Notice(kind === "run" ? "\uB3CC\uB9AC\uAE30 \uC694\uCCAD\uC744 \uC62C\uB838\uC2B5\uB2C8\uB2E4" : kind === "gpt" ? "ChatGPT \uC5D0 \uBB3C\uC74C\uC744 \uC62C\uB838\uC2B5\uB2C8\uB2E4 (\uD074\uB85C\uB4DC\uB294 \uC548 \uB739\uB2C8\uB2E4)" : "\uBB3C\uC74C\uC744 \uC62C\uB838\uC2B5\uB2C8\uB2E4");
+        new import_obsidian.Notice(ASK_SENT[kind] || ASK_SENT.ask);
         const d = new Date(now), z = (n) => String(n).padStart(2, "0");
         return { ok: true, msg: `\u2705 \uC62C\uB838\uC2B5\uB2C8\uB2E4 ${z(d.getHours())}:${z(d.getMinutes())}` };
       }
