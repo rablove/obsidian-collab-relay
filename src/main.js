@@ -36,13 +36,26 @@ const DIAG_DIR = '60_System/_sync-diag';
 // 파일로 내려가지 않는다. ⭐ 캔버스 파일을 안 건드리는 게 핵심이다: 판을 고쳐서 알리면
 // 「열어 둔 캔버스」 문제(아래 canvasOpenPaths 주석)를 그대로 지나게 된다.
 const ASK_DIR = '60_System/_canvas-ask';
+// ⭐ #code 아닌 채널로 보내는 요청은 **다른 폴더**에 둔다 (0.5.70, ops 채널 요청 2026-08-22).
+//    읽는 쪽이 다르기 때문이다 — `_canvas-ask/` 는 `canvas_watch.py`(판·PR·돌리기 규약)가,
+//    이쪽은 `ask_watch.py`(채널중립)가 읽고 **각자 자기 것만 지운다.** 한 폴더를 둘이 읽으면
+//    먼저 지운 쪽이 이겨 요청이 조용히 사라진다.
+const GEN_ASK_DIR = '60_System/_ask';
+// 고를 수 있는 채널 목록이 든 문서. **서버가 써 두고 플러그인은 읽기만 한다** —
+// 이 저장소는 공개라 채널 이름을 소스에 박지 않는다(sync-plugin 규칙 §7). 못 읽으면
+// 예전 그대로 `여기`·`Vega` 둘만 보인다.
+const ASK_CHANNELS_DOC = '60_System/_ask-channels.json';
+let ASK_CH_LIST = [];   // 위 파일에서 읽은 채널 이름들. 읽기 전·못 읽으면 빈 목록.
 const ASK_MAX_PER_HOUR = 6;   // 실수로 눌러대도 세션이 수십 개 뜨지 않게 (canvas_watch.py 와 같은 상한)
 // 블록 «머리»에 놓는 설정 줄. 이름과 «값이 말이 되는가»까지 서버 `pipeline_canvas.head_fields` 와 같게 둔다 —
 // 두 쪽이 다르게 걷으면 카드에 적은 글이 어느 한쪽에서 사라진다.
 //  ⭐ `pr`·`판` 은 **판 밖(보통 노트)에서 누를 때** 쓰는 둘이다 (형 지시 2026-08-17). 노트에서 누르면
 //     「어느 판인가」가 요청에 안 실리므로 글이 말해야 한다. 서버 `pipeline_canvas._FIELD_NAMES` 와 같다.
+//  ⭐ `계정` 은 **#code 아닌 채널로 보낼 때** 쓴다 (0.5.70). 드롭다운의 `Vega` 는 «#code-selim»
+//     한 곳을 가리키는 항목이라, 다른 채널의 -selim 쪽으로 보내려면 적을 자리가 있어야 한다.
 const ASK_FIELDS = { unit: 'unit', '단위': 'unit', '채널': '채널', channel: '채널',
-  '종류': '종류', kind: '종류', pr: 'pr', '판': '판' };
+  '종류': '종류', kind: '종류', pr: 'pr', '판': '판', '계정': '계정', account: '계정' };
+const ASK_ACCOUNTS = { 'base': 1, '기본': 1, 'vega': 1, '베가': 1, 'selim': 1, '셀림': 1 };
 // 아는 채널 값 → 드롭다운에서 그것이 가리키는 항목. 이름표(어느 채널로 실제로 가나)는 서버
 // `pipeline_canvas.CHANNELS` 한 곳에만 두고, 여기는 «고를 수 있는 값인가»만 본다.
 const ASK_CHANNELS = { '': '여기', '여기': '여기', 'code': '여기', '기본': '여기', 'base': '여기',
@@ -65,7 +78,12 @@ const ASK_SENT = { ask: '물음을 올렸습니다', run: '돌리기 요청을 �
   gpt: 'ChatGPT 에 물음을 올렸습니다 (클로드는 안 뜹니다)', look: '확인용 요청을 올렸습니다' };
 // ⛔ 값까지 봐야 설정이다. 이름만 보면 형이 적은 「채널: 이 얘기는 어디서 하죠?」 가 설정으로 먹혀 물음이 사라진다.
 const ASK_FIELD_OK = { unit: (v) => /^\d+\.\d+$/.test(v),
-  '채널': (v) => Object.prototype.hasOwnProperty.call(ASK_CHANNELS, v.trim().toLowerCase()),
+  // ⭐ 실제로 있는 채널 이름만 설정으로 친다 (0.5.70). «슬러그처럼 생겼으면 통과」로 하지
+  //    않는 까닭: 형이 적은 「채널: 이 얘기는 어디서 하죠?」 가 설정으로 먹혀 물음이 사라지는
+  //    것을 막으려고 값까지 보는 것인데, 꼴만 보면 「채널: 내일」 같은 것이 그대로 새 나간다.
+  '채널': (v) => { const s = v.trim().toLowerCase();
+    return Object.prototype.hasOwnProperty.call(ASK_CHANNELS, s) || ASK_CH_LIST.indexOf(s) >= 0; },
+  '계정': (v) => Object.prototype.hasOwnProperty.call(ASK_ACCOUNTS, v.trim().toLowerCase()),
   '종류': (v) => Object.prototype.hasOwnProperty.call(ASK_KINDS, v.trim()),
   pr: (v) => /^\d+$/.test(v.trim()), '판': (v) => !!v.trim() };
 // ⛔ 아래 «그림·캔버스» 관련은 main-db(이 플러그인) 전용이다 — ai-study-sync 에는 «일부러» 넣지 않았다
@@ -211,6 +229,8 @@ export default class VaultSyncCollab extends Plugin {
     //    판의 값을 안 바꾸는 요청. 보내는 구조는 `lpms-ask` 와 같고 요청의 `kind` 만 `'look'` 이다.
     this.registerMarkdownCodeBlockProcessor('lpms-look', (src, el, ctx) => this.renderAskBlock(src, el, ctx, 'look'));
     await this.loadSettings();
+    // 채널 목록은 미리 받아 둔다 — 단추를 처음 누를 때 기다리지 않게. 실패해도 그냥 지나간다.
+    this.loadAskChannels().catch(() => {});
     if (!this.settings.deviceId) { this.settings.deviceId = 'dev-' + Math.random().toString(36).slice(2, 7); await this.saveSettings(); }
     if (!this.settings.deviceLabel) { this.settings.deviceLabel = 'dev-' + Math.random().toString(36).slice(2, 5); await this.saveSettings(); }
     this.userColor = COLORS[Math.floor(Math.random() * COLORS.length)];
@@ -496,9 +516,30 @@ export default class VaultSyncCollab extends Plugin {
     return Object.assign(body, fields);
   }
   // 드롭다운의 «처음 값» — 아는 값이면 그 항목, 아니면 `여기`.
+  //  ⭐ 0.5.70: `채널: <채널이름>` 처럼 **채널 이름을 그대로 적은 것**도 처음 값이 된다.
+  //     `ASK_CHANNELS` 는 «여기/Vega» 두 항목으로 접는 표라 그것만 보면 다 `여기`로 떨어진다.
   askChannelSeed(seed) {
     const v = seed ? seed['채널'] : undefined;
-    return (v === undefined ? null : ASK_CHANNELS[String(v).trim().toLowerCase()]) || '여기';
+    if (v === undefined) return '여기';
+    const s = String(v).trim().toLowerCase();
+    if (ASK_CH_LIST.indexOf(s) >= 0) return s;
+    return ASK_CHANNELS[s] || '여기';
+  }
+  /* 고를 수 있는 채널 목록을 **서버에서** 읽어 둔다 (0.5.70).
+     서버 `ask_watch.py publish-channels` 가 봇 설정에서 뽑아 그 자리에 써 둔다.
+     ⛔ 기기의 파일로 읽지 않는다 — 경로가 `.md` 로 안 끝나면 **어느 기기에도 파일로 안 내려간다**
+        (`isTextPath`. `_canvas-ask`·`_sync-diag` 와 같은 방식이다). 그래서 문서를 곧장 GET 한다.
+     ⛔ 못 읽어도 조용히 지나간다 — 그러면 예전처럼 `여기`·`Vega` 둘만 보인다. 채널 이름을
+        소스에 박지 않으려고 이렇게 한다(저장소가 공개다). */
+  async loadAskChannels() {
+    try {
+      const res = await this.req('GET', this.docUrl(this.idFor(ASK_CHANNELS_DOC)));
+      if (res.status !== 200) return ASK_CH_LIST;
+      const j = JSON.parse((res.json || {}).content || '{}');
+      const list = Array.isArray(j) ? j : (j && j.channels) || [];
+      ASK_CH_LIST = list.filter((c) => typeof c === 'string' && /^[a-z0-9][a-z0-9-]{1,40}$/.test(c));
+    } catch (e) { /* 아직 안 올라왔거나 연결이 없다 — 예전 둘만 보인다 */ }
+    return ASK_CH_LIST;
   }
   renderAskBlock(src, el, ctx, kind) {
     const { fields, rest } = this.askHeadFields(src);
@@ -513,13 +554,25 @@ export default class VaultSyncCollab extends Plugin {
     // 돌리기에도 붙는 까닭: 쌍둥이 채널(#code ↔ #code-selim)은 계정이 달라 한도를 나눠 쓰는 자리라
     // 「이 스윕은 저쪽 계정에서 돌려라」가 뜻이 있다.
     // ⛔ ChatGPT 단추에는 안 붙인다 — 그 길은 마터모스트 채널을 안 거쳐 고를 것이 없다.
+    // ⭐ 0.5.70: `보내기`(ask) 에는 **다른 채널들도** 붙는다. 판·PR·큐를 지고 있는 `돌리기`·
+    //    `확인용` 은 #code 파이프라인 전용이라 예전 둘만 둔다 — 다른 채널로 보내 봐야 그쪽
+    //    스킬은 판을 모른다. 목록은 서버에서 오고(loadAskChannels), 아직 안 왔으면 둘만이다.
     let sel = null;
     if (kind !== 'gpt') {
       sel = row.createEl('select', { cls: 'lpms-ask-ch' });
-      for (const [v, t] of [['여기', '여기'], ['vega', 'Vega']]) {
-        const o = sel.createEl('option', { text: t }); o.value = v;
-      }
-      sel.value = this.askChannelSeed(seed);
+      const fill = () => {
+        sel.empty();
+        for (const [v, t] of [['여기', '여기'], ['vega', 'Vega']]) {
+          const o = sel.createEl('option', { text: t }); o.value = v;
+        }
+        if (kind === 'ask') {
+          for (const c of ASK_CH_LIST) { const o = sel.createEl('option', { text: '#' + c }); o.value = c; }
+        }
+        sel.value = this.askChannelSeed(seed);
+      };
+      fill();
+      // 목록이 아직 안 읽혔으면 읽고 다시 채운다 — 그리는 것은 못 기다리므로(동기) 나중에 갈아 끼운다.
+      if (kind === 'ask' && !ASK_CH_LIST.length) this.loadAskChannels().then(() => { try { fill(); } catch (e) {} });
     }
     // 빈칸으로 둔다 — 누른 뒤 «올리는 중…»·«✅ 올렸습니다»·«⛔ …» 가 여기로 나온다(상태 표시줄).
     const note = box.createDiv({ cls: 'lpms-ask-note', text: '' });
@@ -546,8 +599,11 @@ export default class VaultSyncCollab extends Plugin {
       const said = inner || seed['종류'] || seed['판'] || seed.pr;
       const text = onCanvas ? (inner || this.askCardText(el, ctx))
                             : (said ? this.askBlockRaw(src, kind) : '');
+      // ⭐ 답이 돌아올 노트 (0.5.70). 판 위에서 누른 것은 답 카드가 판에 붙으므로 안 싣는다.
+      const answerTo = onCanvas ? null : ((ctx && ctx.sourcePath) || (af ? af.path : '') || null);
       const r = await this.sendCanvasAsk({ board, kind, text, unit, channel: sel ? sel.value : null,
-        kind2: seed['종류'], board2: seed['판'], pr: seed.pr });
+        kind2: seed['종류'], board2: seed['판'], pr: seed.pr,
+        account: seed['계정'], answerTo });
       note.setText(r.msg);
       if (!r.ok) { btn.disabled = false; return; }
       // 다시 누를 수는 있게 하되 바로는 아니다 — 손이 두 번 가서 세션이 둘 뜨는 것을 막는다.
@@ -825,7 +881,7 @@ export default class VaultSyncCollab extends Plugin {
   }
   // 판이 그려지는 데 시간이 걸린다 — 한 번만 부르면 놓친다. 몇 번 더 두드린다.
   askMenuSoon() { for (const d of [0, 300, 1200]) { try { window.setTimeout(() => this.askMenuMount(), d); } catch (e) {} } }
-  async sendCanvasAsk({ board, kind, text, unit, channel, kind2, board2, pr }) {
+  async sendCanvasAsk({ board, kind, text, unit, channel, kind2, board2, pr, account, answerTo }) {
     if (!this.configured()) return { ok: false, msg: '⛔ 로그인부터 하십시오' };
     // ⭐ `종류:` 가 붙은 카드(지금은 «새 실험»)는 글이 없어도 뜻이 선다 — `▶ 돌리기` 와 같다.
     //    「판 하나 만들어 주세요」가 그 자체로 요청이라, 글을 안 적었다고 막으면 [생성]·복제로
@@ -838,8 +894,16 @@ export default class VaultSyncCollab extends Plugin {
     if (this._askSent.length >= ASK_MAX_PER_HOUR) return { ok: false, msg: `⛔ 한 시간 상한(${ASK_MAX_PER_HOUR}건)에 걸렸습니다` };
     const at = new Date(now).toISOString();
     const dev = this.settings.deviceId || 'unknown';
-    const p = `${ASK_DIR}/${at.replace(/[:.]/g, '-')}_${dev}`;
+    // ⭐ #code 아닌 채널로 가는 것은 폴더가 다르다 (0.5.70) — 읽는 서버 데몬이 다르기 때문이다
+    //    (위 GEN_ASK_DIR 주석). `여기`·`vega` 는 예전 그대로 `_canvas-ask/` 다.
+    const generic = !!channel && channel !== '여기' && channel !== 'vega';
+    const p = `${generic ? GEN_ASK_DIR : ASK_DIR}/${at.replace(/[:.]/g, '-')}_${dev}`;
     const rec = { board: board || null, kind, text: text || '', unit: unit || null, at, device: dev };
+    // ⭐ 답이 돌아올 노트. 받는 채널이 `asknote.py` 로 여기에 답을 적는다 (공통규칙 §24).
+    if (generic && answerTo) rec.answer_to = answerTo;
+    // 어느 계정의 채널인가 — 안 적으면 기본 계정. 드롭다운의 `Vega` 는 #code-selim 한 곳이라
+    // 다른 채널의 -selim 쪽은 블록에 `계정: vega` 로 적는다.
+    if (generic && account) rec['계정'] = account;
     // 드롭다운으로 «고른» 값이라 서버는 이것을 블록에 적힌 값보다 먼저 본다(canvas_watch).
     // 0.5.49 부터 드롭다운이 늘 있어 이 값도 늘 실린다 — 그래서 처음 값을 블록뿐 아니라
     // 카드 글에서도 읽는다(askChannelSeed). 옛 기기·다른 길로 안 실려 오면 서버가 되짚는다.

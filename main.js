@@ -10377,6 +10377,9 @@ var DEFAULTS = {
 var UPDATE_REPO = "rablove/obsidian-collab-relay";
 var DIAG_DIR = "60_System/_sync-diag";
 var ASK_DIR = "60_System/_canvas-ask";
+var GEN_ASK_DIR = "60_System/_ask";
+var ASK_CHANNELS_DOC = "60_System/_ask-channels.json";
+var ASK_CH_LIST = [];
 var ASK_MAX_PER_HOUR = 6;
 var ASK_FIELDS = {
   unit: "unit",
@@ -10386,8 +10389,11 @@ var ASK_FIELDS = {
   "\uC885\uB958": "\uC885\uB958",
   kind: "\uC885\uB958",
   pr: "pr",
-  "\uD310": "\uD310"
+  "\uD310": "\uD310",
+  "\uACC4\uC815": "\uACC4\uC815",
+  account: "\uACC4\uC815"
 };
+var ASK_ACCOUNTS = { "base": 1, "\uAE30\uBCF8": 1, "vega": 1, "\uBCA0\uAC00": 1, "selim": 1, "\uC140\uB9BC": 1 };
 var ASK_CHANNELS = {
   "": "\uC5EC\uAE30",
   "\uC5EC\uAE30": "\uC5EC\uAE30",
@@ -10421,7 +10427,14 @@ var ASK_SENT = {
 };
 var ASK_FIELD_OK = {
   unit: (v) => /^\d+\.\d+$/.test(v),
-  "\uCC44\uB110": (v) => Object.prototype.hasOwnProperty.call(ASK_CHANNELS, v.trim().toLowerCase()),
+  // ⭐ 실제로 있는 채널 이름만 설정으로 친다 (0.5.70). «슬러그처럼 생겼으면 통과」로 하지
+  //    않는 까닭: 형이 적은 「채널: 이 얘기는 어디서 하죠?」 가 설정으로 먹혀 물음이 사라지는
+  //    것을 막으려고 값까지 보는 것인데, 꼴만 보면 「채널: 내일」 같은 것이 그대로 새 나간다.
+  "\uCC44\uB110": (v) => {
+    const s = v.trim().toLowerCase();
+    return Object.prototype.hasOwnProperty.call(ASK_CHANNELS, s) || ASK_CH_LIST.indexOf(s) >= 0;
+  },
+  "\uACC4\uC815": (v) => Object.prototype.hasOwnProperty.call(ASK_ACCOUNTS, v.trim().toLowerCase()),
   "\uC885\uB958": (v) => Object.prototype.hasOwnProperty.call(ASK_KINDS, v.trim()),
   pr: (v) => /^\d+$/.test(v.trim()),
   "\uD310": (v) => !!v.trim()
@@ -10689,6 +10702,8 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     this.registerMarkdownCodeBlockProcessor("lpms-ask-gpt", (src, el, ctx) => this.renderAskBlock(src, el, ctx, "gpt"));
     this.registerMarkdownCodeBlockProcessor("lpms-look", (src, el, ctx) => this.renderAskBlock(src, el, ctx, "look"));
     await this.loadSettings();
+    this.loadAskChannels().catch(() => {
+    });
     if (!this.settings.deviceId) {
       this.settings.deviceId = "dev-" + Math.random().toString(36).slice(2, 7);
       await this.saveSettings();
@@ -11074,9 +11089,31 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     return Object.assign(body, fields);
   }
   // 드롭다운의 «처음 값» — 아는 값이면 그 항목, 아니면 `여기`.
+  //  ⭐ 0.5.70: `채널: <채널이름>` 처럼 **채널 이름을 그대로 적은 것**도 처음 값이 된다.
+  //     `ASK_CHANNELS` 는 «여기/Vega» 두 항목으로 접는 표라 그것만 보면 다 `여기`로 떨어진다.
   askChannelSeed(seed) {
     const v = seed ? seed["\uCC44\uB110"] : void 0;
-    return (v === void 0 ? null : ASK_CHANNELS[String(v).trim().toLowerCase()]) || "\uC5EC\uAE30";
+    if (v === void 0) return "\uC5EC\uAE30";
+    const s = String(v).trim().toLowerCase();
+    if (ASK_CH_LIST.indexOf(s) >= 0) return s;
+    return ASK_CHANNELS[s] || "\uC5EC\uAE30";
+  }
+  /* 고를 수 있는 채널 목록을 **서버에서** 읽어 둔다 (0.5.70).
+     서버 `ask_watch.py publish-channels` 가 봇 설정에서 뽑아 그 자리에 써 둔다.
+     ⛔ 기기의 파일로 읽지 않는다 — 경로가 `.md` 로 안 끝나면 **어느 기기에도 파일로 안 내려간다**
+        (`isTextPath`. `_canvas-ask`·`_sync-diag` 와 같은 방식이다). 그래서 문서를 곧장 GET 한다.
+     ⛔ 못 읽어도 조용히 지나간다 — 그러면 예전처럼 `여기`·`Vega` 둘만 보인다. 채널 이름을
+        소스에 박지 않으려고 이렇게 한다(저장소가 공개다). */
+  async loadAskChannels() {
+    try {
+      const res = await this.req("GET", this.docUrl(this.idFor(ASK_CHANNELS_DOC)));
+      if (res.status !== 200) return ASK_CH_LIST;
+      const j = JSON.parse((res.json || {}).content || "{}");
+      const list = Array.isArray(j) ? j : j && j.channels || [];
+      ASK_CH_LIST = list.filter((c) => typeof c === "string" && /^[a-z0-9][a-z0-9-]{1,40}$/.test(c));
+    } catch (e) {
+    }
+    return ASK_CH_LIST;
   }
   renderAskBlock(src, el, ctx, kind) {
     const { fields, rest } = this.askHeadFields(src);
@@ -11090,11 +11127,27 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     let sel = null;
     if (kind !== "gpt") {
       sel = row.createEl("select", { cls: "lpms-ask-ch" });
-      for (const [v, t] of [["\uC5EC\uAE30", "\uC5EC\uAE30"], ["vega", "Vega"]]) {
-        const o = sel.createEl("option", { text: t });
-        o.value = v;
-      }
-      sel.value = this.askChannelSeed(seed);
+      const fill = () => {
+        sel.empty();
+        for (const [v, t] of [["\uC5EC\uAE30", "\uC5EC\uAE30"], ["vega", "Vega"]]) {
+          const o = sel.createEl("option", { text: t });
+          o.value = v;
+        }
+        if (kind === "ask") {
+          for (const c of ASK_CH_LIST) {
+            const o = sel.createEl("option", { text: "#" + c });
+            o.value = c;
+          }
+        }
+        sel.value = this.askChannelSeed(seed);
+      };
+      fill();
+      if (kind === "ask" && !ASK_CH_LIST.length) this.loadAskChannels().then(() => {
+        try {
+          fill();
+        } catch (e) {
+        }
+      });
     }
     const note = box.createDiv({ cls: "lpms-ask-note", text: "" });
     const drawnOnCanvas = this.askOnCanvas(el, ctx);
@@ -11107,6 +11160,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       const board = onCanvas ? ctx && ctx.sourcePath || (af ? af.path : "") : null;
       const said = inner || seed["\uC885\uB958"] || seed["\uD310"] || seed.pr;
       const text2 = onCanvas ? inner || this.askCardText(el, ctx) : said ? this.askBlockRaw(src, kind) : "";
+      const answerTo = onCanvas ? null : ctx && ctx.sourcePath || (af ? af.path : "") || null;
       const r = await this.sendCanvasAsk({
         board,
         kind,
@@ -11115,7 +11169,9 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
         channel: sel ? sel.value : null,
         kind2: seed["\uC885\uB958"],
         board2: seed["\uD310"],
-        pr: seed.pr
+        pr: seed.pr,
+        account: seed["\uACC4\uC815"],
+        answerTo
       });
       note.setText(r.msg);
       if (!r.ok) {
@@ -11467,7 +11523,7 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
       }
     }
   }
-  async sendCanvasAsk({ board, kind, text: text2, unit, channel, kind2, board2, pr }) {
+  async sendCanvasAsk({ board, kind, text: text2, unit, channel, kind2, board2, pr, account, answerTo }) {
     if (!this.configured()) return { ok: false, msg: "\u26D4 \uB85C\uADF8\uC778\uBD80\uD130 \uD558\uC2ED\uC2DC\uC624" };
     if (kind !== "run" && !text2 && !kind2) return { ok: false, msg: "\u26D4 \uC774 \uCE74\uB4DC\uC5D0 \uBB3C\uC74C\uC744 \uC801\uACE0 \uB204\uB974\uC2ED\uC2DC\uC624" };
     const now = Date.now();
@@ -11475,8 +11531,11 @@ var VaultSyncCollab = class extends import_obsidian.Plugin {
     if (this._askSent.length >= ASK_MAX_PER_HOUR) return { ok: false, msg: `\u26D4 \uD55C \uC2DC\uAC04 \uC0C1\uD55C(${ASK_MAX_PER_HOUR}\uAC74)\uC5D0 \uAC78\uB838\uC2B5\uB2C8\uB2E4` };
     const at = new Date(now).toISOString();
     const dev = this.settings.deviceId || "unknown";
-    const p = `${ASK_DIR}/${at.replace(/[:.]/g, "-")}_${dev}`;
+    const generic = !!channel && channel !== "\uC5EC\uAE30" && channel !== "vega";
+    const p = `${generic ? GEN_ASK_DIR : ASK_DIR}/${at.replace(/[:.]/g, "-")}_${dev}`;
     const rec = { board: board || null, kind, text: text2 || "", unit: unit || null, at, device: dev };
+    if (generic && answerTo) rec.answer_to = answerTo;
+    if (generic && account) rec["\uACC4\uC815"] = account;
     if (channel) rec["\uCC44\uB110"] = channel;
     if (kind2) rec["\uC885\uB958"] = kind2;
     if (board2) rec["\uD310"] = board2;
